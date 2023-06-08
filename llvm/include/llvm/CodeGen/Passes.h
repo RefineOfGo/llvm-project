@@ -318,6 +318,14 @@ namespace llvm {
   /// used by the shadow stack GC.
   extern char &ShadowStackGCLoweringID;
 
+  /// ROGGCLowering - Implements the custom lowering mechanism used by
+  /// the ROG GC.  Only runs on functions which opt in to the ROG collector.
+  FunctionPass *createROGGCLoweringPass();
+
+  /// ROGGCLowering - Implements the custom lowering mechanism used by
+  /// the ROG GC.
+  extern char &ROGGCLoweringID;
+
   /// GCMachineCodeAnalysis - Target-independent pass to mark safe points
   /// in machine code. Must be added very late during code generation, just
   /// prior to output, and importantly after all CFG transformations (such as

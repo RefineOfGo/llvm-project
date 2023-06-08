@@ -787,6 +787,7 @@ static bool canGuaranteeTCO(CallingConv::ID CC, bool GuaranteeTailCalls) {
 static bool mayTailCallThisCC(CallingConv::ID CC) {
   switch (CC) {
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::PreserveNone:

@@ -354,9 +354,8 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return (HasSSE ? CSR_Win32_CFGuard_Check_SaveList
                    : CSR_Win32_CFGuard_Check_NoSSE_SaveList);
   case CallingConv::Cold:
-    if (Is64Bit)
-      return CSR_64_MostRegs_SaveList;
-    break;
+    assert(Is64Bit && "Cold calling convention does not work on 32-bit X86");
+    return CSR_64_MostRegs_SaveList;
   case CallingConv::Win64:
     if (!HasSSE)
       return CSR_Win64_NoSSE_SaveList;
@@ -476,9 +475,8 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     return (HasSSE ? CSR_Win32_CFGuard_Check_RegMask
                    : CSR_Win32_CFGuard_Check_NoSSE_RegMask);
   case CallingConv::Cold:
-    if (Is64Bit)
-      return CSR_64_MostRegs_RegMask;
-    break;
+    assert(Is64Bit && "Cold calling convention does not work on 32-bit X86");
+    return CSR_64_MostRegs_RegMask;
   case CallingConv::Win64:
     return CSR_Win64_RegMask;
   case CallingConv::SwiftTail:

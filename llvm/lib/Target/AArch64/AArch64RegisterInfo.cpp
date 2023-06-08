@@ -77,6 +77,8 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_AArch64_NoRegs_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::PreserveNone)
     return CSR_AArch64_NoneRegs_SaveList;
+  if (MF->getFunction().getCallingConv() == CallingConv::Cold)
+    return CSR_AArch64_Cold_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::AnyReg)
     return CSR_AArch64_AllRegs_SaveList;
 
@@ -287,6 +289,13 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
                : CSR_AArch64_NoneRegs_RegMask;
   if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
+
+  // CallingConv::Cold does not support stack shadowing.
+  if (CC == CallingConv::Cold) {
+    if (SCS)
+      report_fatal_error("ShadowCallStack attribute not available for coldcc.");
+    return CSR_AArch64_Cold_RegMask;
+  }
 
   // All the following calling conventions are handled differently on Darwin.
   if (MF.getSubtarget<AArch64Subtarget>().isTargetDarwin()) {
@@ -628,7 +637,9 @@ bool AArch64RegisterInfo::isArgumentRegister(const MachineFunction &MF,
       return HasReg(CC_AArch64_Preserve_None_ArgRegs, Reg);
     [[fallthrough]];
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::Fast:
+  case CallingConv::Cold:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::CXX_FAST_TLS:

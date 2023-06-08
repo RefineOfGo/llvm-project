@@ -7189,7 +7189,9 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
       return CC_AArch64_Preserve_None;
     [[fallthrough]];
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::Fast:
+  case CallingConv::Cold:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::CXX_FAST_TLS:
@@ -7872,6 +7874,7 @@ static bool canGuaranteeTCO(CallingConv::ID CC, bool GuaranteeTailCalls) {
 static bool mayTailCallThisCC(CallingConv::ID CC) {
   switch (CC) {
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::AArch64_SVE_VectorCall:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:

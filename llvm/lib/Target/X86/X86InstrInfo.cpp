@@ -4318,7 +4318,12 @@ void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
 
   LLVM_DEBUG(dbgs() << "Cannot copy " << RI.getName(SrcReg) << " to "
                     << RI.getName(DestReg) << '\n');
-  report_fatal_error("Cannot emit physreg copy instruction");
+  SmallVector<char, 64> Buffer;
+  raw_svector_ostream OS(Buffer);
+  OS << "LLVM ERROR: Cannot copy " << RI.getName(SrcReg) << " to "
+                    << RI.getName(DestReg) << '\n' << MBB << "\n";
+  // report_fatal_error("Cannot emit physreg copy instruction");
+  report_fatal_error(OS.str());
 }
 
 std::optional<DestSourcePair>

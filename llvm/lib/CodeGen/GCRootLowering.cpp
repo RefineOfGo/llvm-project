@@ -21,7 +21,9 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ROGGC.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCContext.h"
 
@@ -191,8 +193,8 @@ static bool InsertRootInitializers(Function &F, ArrayRef<AllocaInst *> Roots) {
 /// runOnFunction - Replace gcread/gcwrite intrinsics with loads and stores.
 /// Leave gcroot intrinsics; the code generator needs to see those.
 bool LowerIntrinsics::runOnFunction(Function &F) {
-  // Quick exit for functions that do not use GC.
-  if (!F.hasGC())
+  // Quick exit for functions that do not use GC or uses ROG GC.
+  if (!F.hasGC() || F.getGC() == ROG_GC_NAME)
     return false;
 
   GCFunctionInfo &FI = getAnalysis<GCModuleInfo>().getFunctionInfo(F);
@@ -212,15 +214,14 @@ bool DoLowering(Function &F, GCStrategy &S) {
         continue;
 
       Function *F = CI->getCalledFunction();
-      switch (F->getIntrinsicID()) {
+      Intrinsic::ID IID = F->getIntrinsicID();
+      switch (IID) {
       default: break;
-      case Intrinsic::gcwrite: {
-        // Replace a write barrier with a simple store.
-        Value *St = new StoreInst(CI->getArgOperand(0), CI->getArgOperand(2),
-                                  CI->getIterator());
-        CI->replaceAllUsesWith(St);
-        CI->eraseFromParent();
-        MadeChange = true;
+      case Intrinsic::gcroot: {
+        // Initialize the GC root, but do not delete the intrinsic. The
+        // backend needs the intrinsic to flag the stack slot.
+        Roots.push_back(
+            cast<AllocaInst>(CI->getArgOperand(0)->stripPointerCasts()));
         break;
       }
       case Intrinsic::gcread: {
@@ -233,11 +234,80 @@ bool DoLowering(Function &F, GCStrategy &S) {
         MadeChange = true;
         break;
       }
-      case Intrinsic::gcroot: {
-        // Initialize the GC root, but do not delete the intrinsic. The
-        // backend needs the intrinsic to flag the stack slot.
-        Roots.push_back(
-            cast<AllocaInst>(CI->getArgOperand(0)->stripPointerCasts()));
+      case Intrinsic::gcwrite: {
+        // Replace a write barrier with a simple store.
+        Value *St = new StoreInst(CI->getArgOperand(0),
+                                  CI->getArgOperand(2),
+                                  CI->getIterator());
+        CI->replaceAllUsesWith(St);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
+      case Intrinsic::gcmemclr:
+      case Intrinsic::gcmemcpy:
+      case Intrinsic::gcmemmove: {
+        // Replace a memory {clear,copy,move} barrier with a call to the intrinsic mem{set,cpy,move}.
+        Value *Fn;
+        Value *Src;
+        Value *Size;
+        Value *Dest = CI->getArgOperand(0);
+        Align MemAlign = Align::Of<void *>();
+        IRBuilder<> IR(CI);
+        if (IID != Intrinsic::gcmemclr) {
+          Src = CI->getArgOperand(1);
+          Size = CI->getArgOperand(2);
+        } else {
+          Src = ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0);
+          Size = CI->getArgOperand(1);
+        }
+        switch (IID) {
+        case Intrinsic::gcmemclr:
+          Fn = IR.CreateMemSet(Dest, Src, Size, MemAlign);
+          break;
+        case Intrinsic::gcmemcpy:
+          Fn = IR.CreateMemCpy(Dest, MemAlign, Src, MemAlign, Size);
+          break;
+        case Intrinsic::gcmemmove:
+          Fn = IR.CreateMemMove(Dest, MemAlign, Src, MemAlign, Size);
+          break;
+        default:
+          llvm_unreachable("Impossible intrinsic ID");
+        }
+        CI->replaceAllUsesWith(Fn);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
+      case Intrinsic::gcatomic_cas: {
+        // Replace an atomic CAS barrier with a simple CAS instruction.
+        AtomicCmpXchgInst *Cas = new AtomicCmpXchgInst(CI->getArgOperand(0),
+                                                       CI->getArgOperand(1),
+                                                       CI->getArgOperand(2),
+                                                       Align::Of<void *>(),
+                                                       AtomicOrdering::SequentiallyConsistent,
+                                                       AtomicOrdering::SequentiallyConsistent,
+                                                       SyncScope::System,
+                                                       CI);
+        Cas->takeName(CI);
+        Cas->setWeak(cast<ConstantInt>(CI->getArgOperand(3))->isOne());
+        Cas->setVolatile(cast<ConstantInt>(CI->getArgOperand(4))->isOne());
+        CI->replaceAllUsesWith(Cas);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
+      case Intrinsic::gcatomic_swap: {
+        // Replace an atomic swap barrier with a simple swap instruction.
+        AtomicRMWInst *Sw = new AtomicRMWInst(AtomicRMWInst::Xchg, CI->getArgOperand(0),
+                                              CI->getArgOperand(1), Align::Of<void *>(),
+                                              AtomicOrdering::SequentiallyConsistent,
+                                              SyncScope::System, CI);
+        Sw->takeName(CI);
+        Sw->setVolatile(cast<ConstantInt>(CI->getArgOperand(2))->isOne());
+        CI->replaceAllUsesWith(Sw);
+        CI->eraseFromParent();
+        MadeChange = true;
         break;
       }
       }
@@ -319,8 +389,8 @@ void GCMachineCodeAnalysis::FindStackOffsets(MachineFunction &MF) {
 }
 
 bool GCMachineCodeAnalysis::runOnMachineFunction(MachineFunction &MF) {
-  // Quick exit for functions that do not use GC.
-  if (!MF.getFunction().hasGC())
+  // Quick exit for functions that do not use GC or uses ROG GC.
+  if (!MF.getFunction().hasGC() || MF.getFunction().getGC() == ROG_GC_NAME)
     return false;
 
   FI = &getAnalysis<GCModuleInfo>().getFunctionInfo(MF.getFunction());

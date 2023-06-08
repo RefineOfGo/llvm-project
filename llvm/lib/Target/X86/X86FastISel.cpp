@@ -1182,6 +1182,7 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
 
   CallingConv::ID CC = F.getCallingConv();
   if (CC != CallingConv::C &&
+      CC != CallingConv::ROG &&
       CC != CallingConv::Fast &&
       CC != CallingConv::Tail &&
       CC != CallingConv::SwiftTail &&
@@ -1198,7 +1199,7 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
 
   // fastcc with -tailcallopt is intended to provide a guaranteed
   // tail call optimization. Fastisel doesn't know how to do that.
-  if ((CC == CallingConv::Fast && TM.Options.GuaranteedTailCallOpt) ||
+  if (((CC == CallingConv::ROG || CC == CallingConv::Fast) && TM.Options.GuaranteedTailCallOpt) ||
       CC == CallingConv::Tail || CC == CallingConv::SwiftTail)
     return false;
 
@@ -3095,7 +3096,7 @@ bool X86FastISel::fastLowerArguments() {
     return false;
 
   CallingConv::ID CC = F->getCallingConv();
-  if (CC != CallingConv::C)
+  if (CC != CallingConv::C && CC != CallingConv::ROG)
     return false;
 
   if (Subtarget->isCallingConvWin64(CC))
@@ -3107,9 +3108,10 @@ bool X86FastISel::fastLowerArguments() {
   if (Subtarget->useSoftFloat())
     return false;
 
-  // Only handle simple cases. i.e. Up to 6 i32/i64 scalar arguments.
+  // Only handle simple cases. i.e. Up to 8 i32/i64 scalar arguments.
   unsigned GPRCnt = 0;
   unsigned FPRCnt = 0;
+  unsigned MaxGPRCnt = CC == CallingConv::C ? 6 : 8;
   for (auto const &Arg : F->args()) {
     if (Arg.hasAttribute(Attribute::ByVal) ||
         Arg.hasAttribute(Attribute::InReg) ||
@@ -3140,7 +3142,7 @@ bool X86FastISel::fastLowerArguments() {
       break;
     }
 
-    if (GPRCnt > 6)
+    if (GPRCnt > MaxGPRCnt)
       return false;
 
     if (FPRCnt > 8)
@@ -3148,10 +3150,12 @@ bool X86FastISel::fastLowerArguments() {
   }
 
   static const MCPhysReg GPR32ArgRegs[] = {
-    X86::EDI, X86::ESI, X86::EDX, X86::ECX, X86::R8D, X86::R9D
+    X86::EDI, X86::ESI, X86::EDX, X86::ECX,
+    X86::R8D, X86::R9D, X86::R10D, X86::EAX
   };
   static const MCPhysReg GPR64ArgRegs[] = {
-    X86::RDI, X86::RSI, X86::RDX, X86::RCX, X86::R8 , X86::R9
+    X86::RDI, X86::RSI, X86::RDX, X86::RCX,
+    X86::R8, X86::R9, X86::R10, X86::RAX
   };
   static const MCPhysReg XMMArgRegs[] = {
     X86::XMM0, X86::XMM1, X86::XMM2, X86::XMM3,
@@ -3245,6 +3249,7 @@ bool X86FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   switch (CC) {
   default: return false;
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::Fast:
   case CallingConv::Tail:
   case CallingConv::Swift:
@@ -3264,7 +3269,7 @@ bool X86FastISel::fastLowerCall(CallLoweringInfo &CLI) {
 
   // fastcc with -tailcallopt is intended to provide a guaranteed
   // tail call optimization. Fastisel doesn't know how to do that.
-  if ((CC == CallingConv::Fast && TM.Options.GuaranteedTailCallOpt) ||
+  if (((CC == CallingConv::ROG || CC == CallingConv::Fast) && TM.Options.GuaranteedTailCallOpt) ||
       CC == CallingConv::Tail || CC == CallingConv::SwiftTail)
     return false;
 

@@ -652,6 +652,13 @@ def CSR_AArch64_TLS_ELF
     : CalleeSavedRegs<(add (sequence "X%u", 1, 28), FP,
                            (sequence "Q%u", 0, 31))>;
 
+// The "coldcc" calling convention makes the caller as efficient as
+// possible by preserving most commonly used registers across function calls.
+def CSR_AArch64_Cold
+    : CalleeSavedRegs<(add (sequence "X%u", 0, 15),
+                           (sequence "X%u", 18, 28), LR, FP,
+                           (sequence "D%u", 0, 31))>;
+
 def CSR_AArch64_AllRegs
     : CalleeSavedRegs<(add (sequence "W%u", 0, 30), WSP,
                            (sequence "X%u", 0, 28), FP, LR, SP,

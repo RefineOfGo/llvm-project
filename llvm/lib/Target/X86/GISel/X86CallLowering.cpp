@@ -326,8 +326,9 @@ bool X86CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
   const TargetInstrInfo &TII = *STI.getInstrInfo();
   const X86RegisterInfo *TRI = STI.getRegisterInfo();
 
-  // Handle only Linux C, X86_64_SysV calling conventions for now.
+  // Handle only Linux C, ROG and X86_64_SysV calling conventions for now.
   if (!STI.isTargetLinux() || !(Info.CallConv == CallingConv::C ||
+                                Info.CallConv == CallingConv::ROG ||
                                 Info.CallConv == CallingConv::X86_64_SysV))
     return false;
 

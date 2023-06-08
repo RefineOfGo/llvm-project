@@ -843,7 +843,6 @@ void TargetPassConfig::addIRPasses() {
 
   // Run GC lowering passes for builtin collectors
   // TODO: add a pass insertion point here
-  addPass(&GCLoweringID);
   addPass(&ShadowStackGCLoweringID);
   addPass(createLowerConstantIntrinsicsPass());
 
@@ -1065,6 +1064,10 @@ bool TargetPassConfig::addISelPasses() {
   addPass(createPreISelIntrinsicLoweringPass());
   addPass(createExpandLargeDivRemPass());
   addPass(createExpandLargeFpConvertPass());
+  addPass(createROGStackCheckPreparingPass());
+  addPass(&ROGCheckPointInsertionID);
+  addPass(&ROGGCLoweringID);
+  addPass(&GCLoweringID);
   addIRPasses();
   addCodeGenPrepare();
   addPassesToHandleExceptions();

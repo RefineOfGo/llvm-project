@@ -467,6 +467,10 @@ static SectionKind getELFKindForNamedSection(StringRef Name, SectionKind K) {
   //
   //   .section   .eh_frame,"a",@progbits
 
+  // ROG-specific bss-like section to put managed objects.
+  if (Name == "rog_gcbss")
+    return SectionKind::getBSS();
+
   if (Name == getInstrProfSectionName(IPSK_covmap, Triple::ELF,
                                       /*AddSegmentInfo=*/false) ||
       Name == getInstrProfSectionName(IPSK_covfun, Triple::ELF,
@@ -524,6 +528,10 @@ static unsigned getELFSectionType(StringRef Name, SectionKind K) {
 
   if (hasPrefix(Name, ".llvm.offloading"))
     return ELF::SHT_LLVM_OFFLOADING;
+
+  if (Name == "rog_gcbss")
+    return ELF::SHT_NOBITS;
+
   if (Name == ".llvm.lto")
     return ELF::SHT_LLVM_LTO;
 

@@ -81,6 +81,9 @@ public:
   void adjustForSegmentedStacks(MachineFunction &MF,
                                 MachineBasicBlock &PrologueMBB) const override;
 
+  void adjustForROGPrologue(MachineFunction &MF,
+                            MachineBasicBlock &PrologueMBB) const override;
+
   void adjustForHiPEPrologue(MachineFunction &MF,
                              MachineBasicBlock &PrologueMBB) const override;
 

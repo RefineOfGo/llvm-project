@@ -1265,6 +1265,8 @@ static bool mayTailCallThisCC(CallingConv::ID CC) {
   case CallingConv::X86_FastCall:
   // Swift:
   case CallingConv::Swift:
+  // ROG:
+  case CallingConv::ROG:
     return true;
   default:
     return canGuaranteeTCO(CC);

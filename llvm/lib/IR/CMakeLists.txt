@@ -61,6 +61,7 @@ add_llvm_component_library(LLVMCore
   ProfileSummary.cpp
   PseudoProbe.cpp
   ReplaceConstant.cpp
+  ROGGC.cpp
   Statepoint.cpp
   StructuralHash.cpp
   Type.cpp

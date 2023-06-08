@@ -587,18 +587,22 @@ void StackMaps::recordStatepoint(const MCSymbol &L, const MachineInstr &MI) {
 /// uint32 : NumRecords
 void StackMaps::emitStackmapHeader(MCStreamer &OS) {
   // Header.
+  OS.AddComment("Version");
   OS.emitIntValue(StackMapVersion, 1); // Version.
   OS.emitIntValue(0, 1);               // Reserved.
   OS.emitInt16(0);                     // Reserved.
 
   // Num functions.
   LLVM_DEBUG(dbgs() << WSMP << "#functions = " << FnInfos.size() << '\n');
+  OS.AddComment("  Num Functions");
   OS.emitInt32(FnInfos.size());
   // Num constants.
   LLVM_DEBUG(dbgs() << WSMP << "#constants = " << ConstPool.size() << '\n');
+  OS.AddComment("  Num Constants");
   OS.emitInt32(ConstPool.size());
   // Num callsites.
   LLVM_DEBUG(dbgs() << WSMP << "#callsites = " << CSInfos.size() << '\n');
+  OS.AddComment("  Num CallSites");
   OS.emitInt32(CSInfos.size());
 }
 
@@ -616,8 +620,11 @@ void StackMaps::emitFunctionFrameRecords(MCStreamer &OS) {
     LLVM_DEBUG(dbgs() << WSMP << "function addr: " << FR.first
                       << " frame size: " << FR.second.StackSize
                       << " callsite count: " << FR.second.RecordCount << '\n');
+    OS.AddComment("Function Address");
     OS.emitSymbolValue(FR.first, 8);
+    OS.AddComment("  Stack Size");
     OS.emitIntValue(FR.second.StackSize, 8);
+    OS.AddComment("  Record Count");
     OS.emitIntValue(FR.second.RecordCount, 8);
   }
 }
@@ -627,9 +634,11 @@ void StackMaps::emitFunctionFrameRecords(MCStreamer &OS) {
 /// int64  : Constants[NumConstants]
 void StackMaps::emitConstantPoolEntries(MCStreamer &OS) {
   // Constant pool entries.
+  int N = 0;
   LLVM_DEBUG(dbgs() << WSMP << "constants:\n");
   for (const auto &ConstEntry : ConstPool) {
     LLVM_DEBUG(dbgs() << WSMP << ConstEntry.second << '\n');
+    OS.AddComment("Constant #" + Twine(N++));
     OS.emitIntValue(ConstEntry.second, 8);
   }
 }
@@ -675,29 +684,47 @@ void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
     // simple overflow checks, but we may eventually communicate other
     // compilation errors this way.
     if (CSLocs.size() > UINT16_MAX || LiveOuts.size() > UINT16_MAX) {
+      OS.AddComment("Invalid CallSite");
       OS.emitIntValue(UINT64_MAX, 8); // Invalid ID.
+      OS.AddComment("  Offset");
       OS.emitValue(CSI.CSOffsetExpr, 4);
       OS.emitInt16(0); // Reserved.
+      OS.AddComment("  Num Locations");
       OS.emitInt16(0); // 0 locations.
       OS.emitInt16(0); // padding.
+      OS.AddComment("  Num Live-out Registers");
       OS.emitInt16(0); // 0 live-out registers.
       OS.emitInt32(0); // padding.
       continue;
     }
 
+    OS.AddComment("PatchPoint #" + Twine(CSI.ID));
     OS.emitIntValue(CSI.ID, 8);
+    OS.AddComment("  Offset");
     OS.emitValue(CSI.CSOffsetExpr, 4);
 
     // Reserved for flags.
     OS.emitInt16(0);
+    OS.AddComment("  Num Locations");
     OS.emitInt16(CSLocs.size());
 
     for (const auto &Loc : CSLocs) {
+      switch (Loc.Type) {
+        case Location::Unprocessed   : OS.AddComment("    Location: Unprocessed"  ); break;
+        case Location::Register      : OS.AddComment("    Location: Register"     ); break;
+        case Location::Direct        : OS.AddComment("    Location: Direct"       ); break;
+        case Location::Indirect      : OS.AddComment("    Location: Indirect"     ); break;
+        case Location::Constant      : OS.AddComment("    Location: Constant"     ); break;
+        case Location::ConstantIndex : OS.AddComment("    Location: ConstantIndex"); break;
+      }
       OS.emitIntValue(Loc.Type, 1);
       OS.emitIntValue(0, 1);  // Reserved
+      OS.AddComment("    Size");
       OS.emitInt16(Loc.Size);
+      OS.AddComment("    Register");
       OS.emitInt16(Loc.Reg);
       OS.emitInt16(0); // Reserved
+      OS.AddComment("    Offset");
       OS.emitInt32(Loc.Offset);
     }
 
@@ -706,11 +733,14 @@ void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
 
     // Num live-out registers and padding to align to 4 byte.
     OS.emitInt16(0);
+    OS.AddComment("  Num LiveOuts");
     OS.emitInt16(LiveOuts.size());
 
     for (const auto &LO : LiveOuts) {
+      OS.AddComment("    DWARF Reg Num");
       OS.emitInt16(LO.DwarfRegNum);
       OS.emitIntValue(0, 1);
+      OS.AddComment("    Size");
       OS.emitIntValue(LO.Size, 1);
     }
     // Emit alignment to 8 byte.

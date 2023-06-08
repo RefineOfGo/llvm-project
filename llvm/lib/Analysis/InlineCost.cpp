@@ -1103,7 +1103,8 @@ class InlineCostCallAnalyzer final : public CallAnalyzer {
 
     // If this function uses the coldcc calling convention, prefer not to inline
     // it.
-    if (F.getCallingConv() == CallingConv::Cold)
+    if (F.getCallingConv() == CallingConv::Cold ||
+        F.getCallingConv() == CallingConv::ROG_Cold)
       Cost += InlineConstants::ColdccPenalty;
 
     LLVM_DEBUG(dbgs() << "      Initial cost: " << Cost << "\n");
@@ -1348,7 +1349,8 @@ private:
               -1 * getCallsiteCost(TTI, this->CandidateCall, DL));
 
     set(InlineCostFeatureIndex::cold_cc_penalty,
-        (F.getCallingConv() == CallingConv::Cold));
+        (F.getCallingConv() == CallingConv::Cold ||
+         F.getCallingConv() == CallingConv::ROG_Cold));
 
     set(InlineCostFeatureIndex::last_call_to_static_bonus,
         isSoleCallToLocalFunction(CandidateCall, F));
@@ -2343,6 +2345,9 @@ bool CallAnalyzer::visitCallBase(CallBase &Call) {
       onLoadRelativeIntrinsic();
       return false;
 
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memset:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:

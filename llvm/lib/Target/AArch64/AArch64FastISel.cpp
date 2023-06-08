@@ -2910,7 +2910,10 @@ bool AArch64FastISel::fastLowerArguments() {
     return false;
 
   CallingConv::ID CC = F->getCallingConv();
-  if (CC != CallingConv::C && CC != CallingConv::Swift)
+  if (CC != CallingConv::C &&
+      CC != CallingConv::ROG &&
+      CC != CallingConv::ROG_Cold &&
+      CC != CallingConv::Swift)
     return false;
 
   if (Subtarget->hasCustomCallingConv())
@@ -3484,6 +3487,10 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
     updateValueMap(II, ResultReg);
     return true;
   }
+  case Intrinsic::gcmemset:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
+    llvm_unreachable("llvm.gcmem{set,cpy,move} should have been lowered already.");
   case Intrinsic::memcpy:
   case Intrinsic::memmove: {
     const auto *MTI = cast<MemTransferInst>(II);

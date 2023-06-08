@@ -123,12 +123,23 @@ static bool isCallingConvCCompatible(CallingConv::ID CC, StringRef TT,
   switch (CC) {
   default:
     return false;
+
   case llvm::CallingConv::C:
     return true;
+
+  case llvm::CallingConv::ROG: {
+    if (Triple(TT).isAArch64())
+      return true;
+
+    if (FuncTy->getNumParams() >= 6)
+      return false;
+
+    LLVM_FALLTHROUGH;
+  }
+
   case llvm::CallingConv::ARM_APCS:
   case llvm::CallingConv::ARM_AAPCS:
   case llvm::CallingConv::ARM_AAPCS_VFP: {
-
     // The iOS ABI diverges from the standard in some cases, so for now don't
     // try to simplify those calls.
     if (Triple(TT).isiOS())

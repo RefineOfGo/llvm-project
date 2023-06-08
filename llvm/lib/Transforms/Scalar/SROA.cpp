@@ -1176,7 +1176,7 @@ private:
               (bool)Length);
   }
 
-  void visitMemTransferInst(MemTransferInst &II) {
+  void visitNonAtomicMemTransferInst(NonAtomicMemTransferInst &II) {
     ConstantInt *Length = dyn_cast<ConstantInt>(II.getLength());
     if (Length && Length->getValue() == 0)
       // Zero-length mem transfer intrinsics can be ignored entirely.
@@ -3298,7 +3298,7 @@ private:
     return !II.isVolatile();
   }
 
-  bool visitMemTransferInst(MemTransferInst &II) {
+  bool visitNonAtomicMemTransferInst(NonAtomicMemTransferInst &II) {
     // Rewriting of memory transfer instructions can be a bit tricky. We break
     // them into two categories: split intrinsics and unsplit intrinsics.
 
@@ -3405,20 +3405,24 @@ private:
 
       Value *DestPtr, *SrcPtr;
       MaybeAlign DestAlign, SrcAlign;
+      Intrinsic::ID IntrID;
       // Note: IsDest is true iff we're copying into the new alloca slice
       if (IsDest) {
         DestPtr = OurPtr;
         DestAlign = SliceAlign;
         SrcPtr = OtherPtr;
         SrcAlign = OtherAlign;
+        IntrID = Intrinsic::memcpy;
       } else {
         DestPtr = OtherPtr;
         DestAlign = OtherAlign;
         SrcPtr = OurPtr;
         SrcAlign = SliceAlign;
+        IntrID = isa<GCMemTransferInst>(II) ? Intrinsic::gcmemcpy : Intrinsic::memcpy;
       }
-      CallInst *New = IRB.CreateMemCpy(DestPtr, DestAlign, SrcPtr, SrcAlign,
-                                       Size, II.isVolatile());
+      CallInst *New = IRB.CreateMemTransferInst(IntrID, DestPtr, DestAlign,
+                                                SrcPtr, SrcAlign, Size,
+                                                II.isVolatile());
       if (AATags)
         New->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
 
@@ -3448,6 +3452,8 @@ private:
     // Reset the other pointer type to match the register type we're going to
     // use, but using the address space of the original other pointer.
     Type *OtherTy;
+    bool StoreBarrier = false;
+
     if (VecTy && !IsWholeAlloca) {
       if (NumElements == 1)
         OtherTy = VecTy->getElementType();
@@ -3457,6 +3463,7 @@ private:
       OtherTy = SubIntTy;
     } else {
       OtherTy = NewAllocaTy;
+      StoreBarrier = !IsDest && NewAllocaTy->isPointerTy();
     }
 
     Value *AdjPtr = getAdjustedPtr(IRB, DL, OtherPtr, OtherOffset, OtherPtrTy,
@@ -3512,8 +3519,11 @@ private:
       Src = convertValue(DL, IRB, Src, NewAllocaTy);
     }
 
-    StoreInst *Store = cast<StoreInst>(
-        IRB.CreateAlignedStore(Src, DstPtr, DstAlign, II.isVolatile()));
+    Value *NullPtr = ConstantPointerNull::get(PointerType::get(II.getContext(), 0));
+    Instruction *Store = StoreBarrier && isa<GCMemTransferInst>(II)
+        ? cast<Instruction>(IRB.CreateGCWrite(Src, NullPtr, DstPtr, II.isVolatile()))
+        : cast<Instruction>(IRB.CreateAlignedStore(Src, DstPtr, DstAlign, II.isVolatile()));
+
     Store->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
                              LLVMContext::MD_access_group});
     if (AATags)

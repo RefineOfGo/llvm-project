@@ -127,6 +127,7 @@
 #include "llvm/CodeGen/RegUsageInfoCollector.h"
 #include "llvm/CodeGen/RegUsageInfoPropagate.h"
 #include "llvm/CodeGen/RegisterUsageInfo.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/CodeGen/SafeStack.h"
 #include "llvm/CodeGen/SelectOptimize.h"
 #include "llvm/CodeGen/ShadowStackGCLowering.h"

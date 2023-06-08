@@ -59,6 +59,7 @@
 #include "llvm/CodeGen/RegUsageInfoPropagate.h"
 #include "llvm/CodeGen/RegisterUsageInfo.h"
 #include "llvm/CodeGen/ReplaceWithVeclib.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/CodeGen/SafeStack.h"
 #include "llvm/CodeGen/SelectOptimize.h"
 #include "llvm/CodeGen/ShadowStackGCLowering.h"
@@ -644,6 +645,7 @@ void CodeGenPassBuilder<Derived, TargetMachineT>::addISelPasses(
   if (TM.useEmulatedTLS())
     addPass(LowerEmuTLSPass());
 
+  addPass(ROGGCLoweringPass());
   addPass(PreISelIntrinsicLoweringPass(&TM));
   addPass(ExpandLargeDivRemPass(&TM));
   addPass(ExpandLargeFpConvertPass(&TM));
@@ -682,6 +684,7 @@ void CodeGenPassBuilder<Derived, TargetMachineT>::addIRPasses(
 
   // Run GC lowering passes for builtin collectors
   // TODO: add a pass insertion point here
+  addPass(ROGCheckPointInsertionPass());
   addPass(GCLoweringPass());
   addPass(ShadowStackGCLoweringPass());
   addPass(LowerConstantIntrinsicsPass());

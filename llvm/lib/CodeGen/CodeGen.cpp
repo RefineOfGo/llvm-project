@@ -120,6 +120,8 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   initializeRemoveLoadsIntoFakeUsesPass(Registry);
   initializeRemoveRedundantDebugValuesPass(Registry);
   initializeRenameIndependentSubregsPass(Registry);
+  initializeROGCheckPointInsertionPass(Registry);
+  initializeROGGCLoweringPass(Registry);
   initializeSafeStackLegacyPassPass(Registry);
   initializeSelectOptimizePass(Registry);
   initializeShadowStackGCLoweringPass(Registry);

@@ -3868,6 +3868,13 @@ LLVMValueRef LLVMBuildMemSet(LLVMBuilderRef B, LLVMValueRef Ptr,
                                       MaybeAlign(Align)));
 }
 
+LLVMValueRef LLVMBuildGCMemSet(LLVMBuilderRef B, LLVMValueRef Ptr,
+                               LLVMValueRef Val, LLVMValueRef Len,
+                               unsigned Align) {
+  return wrap(unwrap(B)->CreateGCMemSet(unwrap(Ptr), unwrap(Val), unwrap(Len),
+                                        MaybeAlign(Align)));
+}
+
 LLVMValueRef LLVMBuildMemCpy(LLVMBuilderRef B,
                              LLVMValueRef Dst, unsigned DstAlign,
                              LLVMValueRef Src, unsigned SrcAlign,
@@ -3877,6 +3884,15 @@ LLVMValueRef LLVMBuildMemCpy(LLVMBuilderRef B,
                                       unwrap(Size)));
 }
 
+LLVMValueRef LLVMBuildGCMemCpy(LLVMBuilderRef B,
+                               LLVMValueRef Dst, unsigned DstAlign,
+                               LLVMValueRef Src, unsigned SrcAlign,
+                               LLVMValueRef Size) {
+  return wrap(unwrap(B)->CreateGCMemCpy(unwrap(Dst), MaybeAlign(DstAlign),
+                                        unwrap(Src), MaybeAlign(SrcAlign),
+                                        unwrap(Size)));
+}
+
 LLVMValueRef LLVMBuildMemMove(LLVMBuilderRef B,
                               LLVMValueRef Dst, unsigned DstAlign,
                               LLVMValueRef Src, unsigned SrcAlign,
@@ -3884,6 +3900,15 @@ LLVMValueRef LLVMBuildMemMove(LLVMBuilderRef B,
   return wrap(unwrap(B)->CreateMemMove(unwrap(Dst), MaybeAlign(DstAlign),
                                        unwrap(Src), MaybeAlign(SrcAlign),
                                        unwrap(Size)));
+}
+
+LLVMValueRef LLVMBuildGCMemMove(LLVMBuilderRef B,
+                                LLVMValueRef Dst, unsigned DstAlign,
+                                LLVMValueRef Src, unsigned SrcAlign,
+                                LLVMValueRef Size) {
+  return wrap(unwrap(B)->CreateGCMemMove(unwrap(Dst), MaybeAlign(DstAlign),
+                                         unwrap(Src), MaybeAlign(SrcAlign),
+                                         unwrap(Size)));
 }
 
 LLVMValueRef LLVMBuildAlloca(LLVMBuilderRef B, LLVMTypeRef Ty,

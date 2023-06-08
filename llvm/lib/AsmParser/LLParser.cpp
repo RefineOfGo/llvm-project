@@ -2207,6 +2207,8 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'm68k_rtdcc'
 ///   ::= 'graalcc'
 ///   ::= 'riscv_vector_cc'
+///   ::= 'rogcc'
+///   ::= 'rog_coldcc'
 ///   ::= 'cc' UINT
 ///
 bool LLParser::parseOptionalCallingConv(unsigned &CC) {
@@ -2283,10 +2285,8 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_riscv_vector_cc:
     CC = CallingConv::RISCV_VectorCall;
     break;
-  case lltok::kw_cc: {
-      Lex.Lex();
-      return parseUInt32(CC);
-    }
+  case lltok::kw_rogcc:          CC = CallingConv::ROG; break;
+  case lltok::kw_rog_coldcc:     CC = CallingConv::ROG_Cold; break;
   }
 
   Lex.Lex();

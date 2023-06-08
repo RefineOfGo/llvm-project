@@ -2873,6 +2873,8 @@ void Verifier::visitFunction(const Function &F) {
     }
 
     [[fallthrough]];
+  case CallingConv::ROG:
+  case CallingConv::ROG_Cold:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::Intel_OCL_BI:
@@ -5669,8 +5671,11 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     break;
   }
   case Intrinsic::gcroot:
-  case Intrinsic::gcwrite:
   case Intrinsic::gcread:
+  case Intrinsic::gcwrite:
+  case Intrinsic::gcmemset:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
     if (ID == Intrinsic::gcroot) {
       AllocaInst *AI =
           dyn_cast<AllocaInst>(Call.getArgOperand(0)->stripPointerCasts());
@@ -5689,6 +5694,9 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "Enclosing function does not use GC.", Call);
     break;
   case Intrinsic::init_trampoline:
+    Check(Call.getParent()->getParent()->getCallingConv() != CallingConv::ROG &&
+          Call.getParent()->getParent()->getCallingConv() != CallingConv::ROG_Cold,
+          "ROG calling conventions do not support nesting.", Call);
     Check(isa<Function>(Call.getArgOperand(1)->stripPointerCasts()),
           "llvm.init_trampoline parameter #2 must resolve to a function.",
           Call);

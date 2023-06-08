@@ -1175,13 +1175,25 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
   for (MachineBasicBlock *SaveBlock : SaveBlocks)
     TFI.inlineStackProbe(MF, *SaveBlock);
 
+  // The two options are mutually exclusive.
+  if (MF.shouldSplitStack() && MF.shouldEmitStackCheckROG())
+    report_fatal_error("ROG Stack Growing conflicts with Segmented Stack.");
+
   // Emit additional code that is required to support segmented stacks, if
   // we've been asked for it.  This, when linked with a runtime with support
   // for segmented stacks (libgcc is one), will result in allocating stack
   // space in small chunks instead of one large contiguous block.
   if (MF.shouldSplitStack()) {
+    if (MF.getFunction().getCallingConv() == CallingConv::ROG ||
+        MF.getFunction().getCallingConv() == CallingConv::ROG_Cold)
+      report_fatal_error("ROG calling conventions do not support Segmented Stack.");
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
+  }
+
+  if (MF.shouldEmitStackCheckROG() || MF.shouldEmitCheckPointROG()) {
+    for (MachineBasicBlock *SaveBlock : SaveBlocks)
+      TFI.adjustForROGPrologue(MF, *SaveBlock);
   }
 
   // Emit additional code that is required to explicitly handle the stack in

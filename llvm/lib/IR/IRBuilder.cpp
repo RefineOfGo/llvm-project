@@ -133,17 +133,18 @@ Value *IRBuilderBase::CreateStepVector(Type *DstType, const Twine &Name) {
   return ConstantVector::get(Indices);
 }
 
-CallInst *IRBuilderBase::CreateMemSet(Value *Ptr, Value *Val, Value *Size,
-                                      MaybeAlign Align, bool isVolatile,
-                                      MDNode *TBAATag, MDNode *ScopeTag,
-                                      MDNode *NoAliasTag) {
-  Value *Ops[] = {Ptr, Val, Size, getInt1(isVolatile)};
-  Type *Tys[] = {Ptr->getType(), Size->getType()};
+CallInst *IRBuilderBase::CreateGCWrite(Value *Val, Value *Obj, Value *Ptr,
+                                       bool isVolatile, MDNode *TBAATag,
+                                       MDNode *ScopeTag, MDNode *NoAliasTag) {
+  Value *Ops[] = { Val, Obj, Ptr };
+  Module *M = BB->getParent()->getParent();
+  CallInst *CI = CreateIntrinsic(Intrinsic::gcwrite, {}, Ops);
 
-  CallInst *CI = CreateIntrinsic(Intrinsic::memset, Tys, Ops);
-
-  if (Align)
-    cast<MemSetInst>(CI)->setDestAlignment(*Align);
+  if (isVolatile) {
+    CI->addAttributeAtIndex(
+        AttributeList::FunctionIndex,
+        Attribute::get(M->getContext(), "volatile", "true"));
+  }
 
   // Set the TBAA info if present.
   if (TBAATag)
@@ -158,18 +159,20 @@ CallInst *IRBuilderBase::CreateMemSet(Value *Ptr, Value *Val, Value *Size,
   return CI;
 }
 
-CallInst *IRBuilderBase::CreateMemSetInline(Value *Dst, MaybeAlign DstAlign,
-                                            Value *Val, Value *Size,
-                                            bool IsVolatile, MDNode *TBAATag,
-                                            MDNode *ScopeTag,
-                                            MDNode *NoAliasTag) {
-  Value *Ops[] = {Dst, Val, Size, getInt1(IsVolatile)};
-  Type *Tys[] = {Dst->getType(), Size->getType()};
+CallInst *IRBuilderBase::CreateMemSet(Intrinsic::ID IntrID, Value *Ptr,
+                                      Value *Val, Value *Size,
+                                      MaybeAlign Align, bool isVolatile,
+                                      MDNode *TBAATag, MDNode *ScopeTag,
+                                      MDNode *NoAliasTag) {
+  assert((IntrID == Intrinsic::gcmemset || IntrID == Intrinsic::memset ||
+          IntrID == Intrinsic::memset_inline) &&
+         "Unexpected intrinsic ID");
+  Value *Ops[] = {Ptr, Val, Size, getInt1(isVolatile)};
+  Type *Tys[] = { Ptr->getType(), Size->getType() };
+  CallInst *CI = CreateIntrinsic(IntrID, Tys, Ops);
 
-  CallInst *CI = CreateIntrinsic(Intrinsic::memset_inline, Tys, Ops);
-
-  if (DstAlign)
-    cast<MemSetInlineInst>(CI)->setDestAlignment(*DstAlign);
+  if (Align)
+    cast<AnyMemSetInst>(CI)->setDestAlignment(*Align);
 
   // Set the TBAA info if present.
   if (TBAATag)
@@ -213,7 +216,8 @@ CallInst *IRBuilderBase::CreateMemTransferInst(
     Intrinsic::ID IntrID, Value *Dst, MaybeAlign DstAlign, Value *Src,
     MaybeAlign SrcAlign, Value *Size, bool isVolatile, MDNode *TBAATag,
     MDNode *TBAAStructTag, MDNode *ScopeTag, MDNode *NoAliasTag) {
-  assert((IntrID == Intrinsic::memcpy || IntrID == Intrinsic::memcpy_inline ||
+  assert((IntrID == Intrinsic::gcmemcpy || IntrID == Intrinsic::gcmemmove ||
+          IntrID == Intrinsic::memcpy || IntrID == Intrinsic::memcpy_inline ||
           IntrID == Intrinsic::memmove) &&
          "Unexpected intrinsic ID");
   Value *Ops[] = {Dst, Src, Size, getInt1(isVolatile)};

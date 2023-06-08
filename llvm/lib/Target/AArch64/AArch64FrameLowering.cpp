@@ -236,6 +236,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/Support/CommandLine.h"
@@ -244,8 +245,10 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -2649,6 +2652,232 @@ bool AArch64FrameLowering::enableCFIFixup(MachineFunction &MF) const {
          MF.getInfo<AArch64FunctionInfo>()->needsAsyncDwarfUnwindInfo(MF);
 }
 
+void AArch64FrameLowering::adjustForROGPrologue(MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
+  // To support shrink-wrapping we would need to insert the new blocks
+  // at the right place and update the branches to PrologueMBB.
+  assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+
+  if (MF.getFunction().isVarArg())
+    report_fatal_error("ROG Stack Growing do not support vararg functions.");
+
+  const AArch64Subtarget &ST = MF.getSubtarget<AArch64Subtarget>();
+  const TargetInstrInfo *TII = ST.getInstrInfo();
+
+  MachineBasicBlock *entryMBB = &PrologueMBB;
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  DebugLoc DL;
+
+  // Emit check-point polling at the entry of function.
+  if (MF.shouldEmitCheckPointROG()) {
+    MachineBasicBlock *yieldMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+    for (const auto &LI : entryMBB->liveins()) {
+      yieldMBB->addLiveIn(LI);
+      checkMBB->addLiveIn(LI);
+    }
+
+    MF.push_back(yieldMBB);
+    MF.push_front(checkMBB);
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::ADRP), AArch64::X17)
+      .addExternalSymbol(kROGCheckpointSw, AArch64II::MO_PAGE);
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+      .addUse(AArch64::X17, RegState::Kill)
+      .addExternalSymbol(kROGCheckpointSw, AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::CBNZX))
+      .addUse(AArch64::X17, RegState::Kill)
+      .addMBB(yieldMBB);
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::B))
+      .addMBB(entryMBB);
+
+    BuildMI(yieldMBB, DL, TII->get(AArch64::ORRXrr), AArch64::X17)
+      .addUse(AArch64::XZR, RegState::Kill)
+      .addUse(AArch64::LR, RegState::Kill);
+
+    BuildMI(yieldMBB, DL, TII->get(AArch64::BL))
+      .addReg(AArch64::X17, RegState::ImplicitKill)
+      .addExternalSymbol(kROGCheckpointFn);
+
+    BuildMI(yieldMBB, DL, TII->get(AArch64::B))
+      .addMBB(entryMBB);
+
+    checkMBB->addSuccessor(yieldMBB, BranchProbability::getZero());
+    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    yieldMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    entryMBB = checkMBB;
+  }
+
+  // Emit stack checking after check-point polling, to wrap the check-point inside stack checking.
+  if (MF.shouldEmitStackCheckROG() && MFI.needsSplitStackProlog()) {
+    uint64_t StackSize = MFI.getStackSize();
+    MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+    static_assert(
+      kROGStackRedZoneSize < 4096,
+      "Red-zone larger than 4095 bytes is not allowed"
+    );
+
+    for (const auto &LI : entryMBB->liveins()) {
+      allocMBB->addLiveIn(LI);
+      checkMBB->addLiveIn(LI);
+    }
+
+    MF.push_back(allocMBB);
+    MF.push_front(checkMBB);
+
+    // When the frame size is less than the red-zone we just compare the stack
+    // boundary directly to the value of the stack pointer.
+    if (StackSize >= kROGStackRedZoneSize) {
+      if (StackSize <= 0xfff) {
+        BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+          .addUse(AArch64::SP)
+          .addImm(StackSize)
+          .addImm(0);
+      } else if (StackSize <= 0xffffff) {
+        BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+          .addUse(AArch64::SP)
+          .addImm(StackSize >> 12)
+          .addImm(12);
+
+        if (StackSize & 0xfff) {
+          BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+            .addUse(AArch64::X16, RegState::Kill)
+            .addImm(StackSize & 0xfff)
+            .addImm(0);
+        }
+      } else {
+        BuildMI(checkMBB, DL, TII->get(AArch64::MOVi64imm), AArch64::X16)
+          .addImm(StackSize);
+
+        BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrx64), AArch64::X16)
+          .addUse(AArch64::SP)
+          .addUse(AArch64::X16, RegState::Kill)
+          .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
+      }
+    }
+
+    switch (ST.getTargetTriple().getOS()) {
+      default: {
+        report_fatal_error("ROG Stack Growing not supported on this platform.");
+      }
+
+      /* Uses TLS register and linker-specified address for stack limit */
+      case Triple::Linux: {
+        int Size = MF.getTarget().Options.TLSSize;
+        Value *Sym = MF.getFunction().getParent()->getGlobalVariable(kROGStackLimit);
+        assert(Sym && "Missing \"rog_stack_limit\" symbol");
+
+        /* default to 24-bit TLS */
+        if (Size == 0) {
+          Size = 24;
+        }
+
+        switch (Size) {
+          default: {
+            llvm_unreachable("Unexpected TLS size");
+          }
+
+          // MRS  x17, TPIDR_EL0
+          // LDR  x17, [x17, :tprel_lo12:<var>]
+          case 12: {
+            BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
+            BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+              .addReg(AArch64::X17, RegState::Kill)
+              .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF);
+            break;
+          }
+
+          // MRS  x17, TPIDR_EL0
+          // ADD  x17, x17, :tprel_hi12:<var>
+          // LDR  x17, [x17, :tprel_lo12_nc:<var>]
+          case 24: {
+            BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
+            BuildMI(checkMBB, DL, TII->get(AArch64::ADDXri), AArch64::X17)
+              .addReg(AArch64::X17, RegState::Kill)
+              .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
+              .addImm(12);
+            BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+              .addReg(AArch64::X17, RegState::Kill)
+              .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+            break;
+          }
+
+          /* ROG does not support larger TLS size */
+          case 32:
+          case 48: {
+            llvm_unreachable("Unsupported TLS size");
+          }
+        }
+        break;
+      }
+
+      /* Uses TPIDRRO_EL0 and hard-coded slot 6 for stack limit.
+      * See: https://github.com/golang/go/issues/23617 */
+      case Triple::Darwin:
+      case Triple::MacOSX: {
+        BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17).addImm(AArch64SysReg::TPIDRRO_EL0);
+        BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17).addUse(AArch64::X17, RegState::Kill).addImm(6);
+        break;
+      }
+    }
+
+    /* Use explicit extended register form of SUBS when comparing SP with X17 to
+    * prevent LLVM from treating SP as XZR and generates wrong code. */
+    if (StackSize >= kROGStackRedZoneSize) {
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
+        .addUse(AArch64::X16)
+        .addUse(AArch64::X17, RegState::Kill);
+    } else {
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrx64), AArch64::XZR)
+        .addUse(AArch64::SP)
+        .addUse(AArch64::X17, RegState::Kill)
+        .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
+    }
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))
+      .addImm(AArch64CC::LS)
+      .addMBB(allocMBB);
+
+    BuildMI(checkMBB, DL, TII->get(AArch64::B))
+      .addMBB(entryMBB);
+
+    if (StackSize < kROGStackRedZoneSize) {
+      BuildMI(allocMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+        .addUse(AArch64::SP)
+        .addImm(StackSize)
+        .addImm(0);
+    } else {
+      allocMBB->addLiveIn(AArch64::X16);
+      allocMBB->sortUniqueLiveIns();
+    }
+
+    BuildMI(allocMBB, DL, TII->get(AArch64::ORRXrr), AArch64::X17)
+      .addUse(AArch64::XZR, RegState::Kill)
+      .addUse(AArch64::LR, RegState::Kill);
+
+    BuildMI(allocMBB, DL, TII->get(AArch64::BL))
+      .addUse(AArch64::X16, RegState::ImplicitKill)
+      .addUse(AArch64::X17, RegState::ImplicitKill)
+      .addExternalSymbol(kROGStackCheckFn);
+
+    BuildMI(allocMBB, DL, TII->get(AArch64::B))
+      .addMBB(entryMBB);
+
+    checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    allocMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+  }
+
+#ifdef EXPENSIVE_CHECKS
+  MF.verify();
+#endif
+}
+
 /// getFrameIndexReference - Provide a base+offset reference to an FI slot for
 /// debug info.  It's the same as what we use for resolving the code-gen
 /// references for now.  FIXME: This can go wrong when references are
@@ -3020,8 +3249,12 @@ static void computeCalleeSaveRegisterPairs(
   (void)CC;
   // MachO's compact unwind format relies on all registers being stored in
   // pairs.
-  assert((!produceCompactUnwindFrame(MF) || CC == CallingConv::PreserveMost ||
-          CC == CallingConv::PreserveAll || CC == CallingConv::CXX_FAST_TLS ||
+  assert((!produceCompactUnwindFrame(MF) ||
+          CC == CallingConv::Cold ||
+          CC == CallingConv::ROG_Cold ||
+          CC == CallingConv::PreserveMost ||
+          CC == CallingConv::PreserveAll ||
+          CC == CallingConv::CXX_FAST_TLS ||
           CC == CallingConv::Win64 || (Count & 1) == 0) &&
          "Odd number of callee-saved regs to spill!");
   int ByteOffset = AFI->getCalleeSavedStackSize();
@@ -3136,8 +3369,12 @@ static void computeCalleeSaveRegisterPairs(
 
     // MachO's compact unwind format relies on all registers being stored in
     // adjacent register pairs.
-    assert((!produceCompactUnwindFrame(MF) || CC == CallingConv::PreserveMost ||
-            CC == CallingConv::PreserveAll || CC == CallingConv::CXX_FAST_TLS ||
+    assert((!produceCompactUnwindFrame(MF) ||
+            CC == CallingConv::Cold ||
+            CC == CallingConv::ROG_Cold ||
+            CC == CallingConv::PreserveMost ||
+            CC == CallingConv::PreserveAll ||
+            CC == CallingConv::CXX_FAST_TLS ||
             CC == CallingConv::Win64 ||
             (RPI.isPaired() &&
              ((RPI.Reg1 == AArch64::LR && RPI.Reg2 == AArch64::FP) ||

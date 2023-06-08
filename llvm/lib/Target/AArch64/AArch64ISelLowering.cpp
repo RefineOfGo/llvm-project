@@ -1207,7 +1207,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
           ISD::FSIN,              ISD::FCOS,           ISD::FTAN,
           ISD::FASIN,             ISD::FACOS,          ISD::FATAN,
           ISD::FSINH,             ISD::FCOSH,          ISD::FTANH,
-          ISD::FPOW,              ISD::FLOG,           ISD::FLOG2,          
+          ISD::FPOW,              ISD::FLOG,           ISD::FLOG2,
           ISD::FLOG10,            ISD::FEXP,           ISD::FEXP2,
           ISD::FEXP10,            ISD::FRINT,          ISD::FROUND,
           ISD::FROUNDEVEN,        ISD::FTRUNC,         ISD::FMINNUM,
@@ -1216,7 +1216,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
           ISD::STRICT_FADD,       ISD::STRICT_FSUB,    ISD::STRICT_FMUL,
           ISD::STRICT_FDIV,       ISD::STRICT_FMA,     ISD::STRICT_FCEIL,
           ISD::STRICT_FFLOOR,     ISD::STRICT_FSQRT,   ISD::STRICT_FRINT,
-          ISD::STRICT_FNEARBYINT, ISD::STRICT_FROUND,  ISD::STRICT_FTRUNC,  
+          ISD::STRICT_FNEARBYINT, ISD::STRICT_FROUND,  ISD::STRICT_FTRUNC,
           ISD::STRICT_FROUNDEVEN, ISD::STRICT_FMINNUM, ISD::STRICT_FMAXNUM,
           ISD::STRICT_FMINIMUM,   ISD::STRICT_FMAXIMUM})
       setOperationAction(Op, MVT::v1f64, Expand);
@@ -7759,7 +7759,10 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
       return CC_AArch64_Preserve_None;
     [[fallthrough]];
   case CallingConv::C:
+  case CallingConv::ROG:
+  case CallingConv::ROG_Cold:
   case CallingConv::Fast:
+  case CallingConv::Cold:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::CXX_FAST_TLS:
@@ -8466,6 +8469,7 @@ static bool canGuaranteeTCO(CallingConv::ID CC, bool GuaranteeTailCalls) {
 static bool mayTailCallThisCC(CallingConv::ID CC) {
   switch (CC) {
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::AArch64_SVE_VectorCall:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:

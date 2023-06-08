@@ -30,10 +30,10 @@ class EarliestEscapeAnalysis;
 class Function;
 class Instruction;
 class LoadInst;
-class MemCpyInst;
-class MemMoveInst;
 class MemorySSA;
 class MemorySSAUpdater;
+class MemCpyInst;
+class MemMoveInst;
 class MemSetInst;
 class PostDominatorTree;
 class StoreInst;
@@ -73,11 +73,14 @@ private:
                             Value *cpyDst, Value *cpySrc, TypeSize cpyLen,
                             Align cpyAlign, BatchAAResults &BAA,
                             std::function<CallInst *()> GetC);
-  bool processMemCpyMemCpyDependence(MemCpyInst *M, MemCpyInst *MDep,
+  bool processMemCpyMemCpyDependence(MemCpyInst *M,
+                                     MemCpyInst *MDep,
                                      BatchAAResults &BAA);
-  bool processMemSetMemCpyDependence(MemCpyInst *MemCpy, MemSetInst *MemSet,
+  bool processMemSetMemCpyDependence(MemCpyInst *MemCpy,
+                                     MemSetInst *MemSet,
                                      BatchAAResults &BAA);
-  bool performMemCpyToMemSetOptzn(MemCpyInst *MemCpy, MemSetInst *MemSet,
+  bool performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
+                                  MemSetInst *MemSet,
                                   BatchAAResults &BAA);
   bool processByValArgument(CallBase &CB, unsigned ArgNo);
   bool processImmutArgument(CallBase &CB, unsigned ArgNo);

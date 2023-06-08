@@ -33,7 +33,9 @@
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/LEB128.h"
+#include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cstdlib>
 
 #define DEBUG_TYPE "x86-fl"
@@ -3247,6 +3249,9 @@ void X86FrameLowering::adjustForSegmentedStacks(
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+  assert(MF.getFunction().getCallingConv() != CallingConv::ROG &&
+         MF.getFunction().getCallingConv() != CallingConv::ROG_Cold &&
+         "ROG calling conventions do not support segmented stacks.");
 
   unsigned ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);
   assert(!MF.getRegInfo().isLiveIn(ScratchReg) &&
@@ -3494,6 +3499,166 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
+void X86FrameLowering::adjustForROGPrologue(MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
+  // To support shrink-wrapping we would need to insert the new blocks
+  // at the right place and update the branches to PrologueMBB.
+  assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+
+  if (!IsLP64 || !Is64Bit)
+    report_fatal_error("ROG prologue not supported on this platform.");
+
+  if (MF.getFunction().isVarArg())
+    report_fatal_error("ROG prologue do not support vararg functions.");
+
+  if (HasNestArgument(&MF))
+    report_fatal_error("ROG prologue do not support nested functions.");
+
+  MachineBasicBlock *entryMBB = &PrologueMBB;
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  DebugLoc DL;
+
+  // Emit check-point polling at the entry of function.
+  if (MF.shouldEmitCheckPointROG()) {
+    MachineBasicBlock *yieldMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+    for (const auto &LI : entryMBB->liveins()) {
+      yieldMBB->addLiveIn(LI);
+      checkMBB->addLiveIn(LI);
+    }
+
+    MF.push_back(yieldMBB);
+    MF.push_front(checkMBB);
+
+    BuildMI(checkMBB, DL, TII.get(X86::MOV64rm), X86::R11)
+      .addReg(X86::RIP)
+      .addImm(1)
+      .addReg(0)
+      .addExternalSymbol(kROGCheckpointSw, X86II::MO_GOTPCREL)
+      .addReg(0);
+
+    BuildMI(checkMBB, DL, TII.get(X86::CMP32mi))
+      .addUse(X86::R11, RegState::Kill)
+      .addImm(1)
+      .addReg(0)
+      .addImm(0)
+      .addReg(0)
+      .addImm(0);
+
+    BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
+      .addMBB(yieldMBB)
+      .addImm(X86::COND_NE);
+
+    BuildMI(checkMBB, DL, TII.get(X86::JMP_1))
+      .addMBB(entryMBB);
+
+    BuildMI(yieldMBB, DL, TII.get(X86::CALL64pcrel32))
+      .addExternalSymbol(kROGCheckpointFn);
+
+    BuildMI(yieldMBB, DL, TII.get(X86::JMP_1))
+      .addMBB(entryMBB);
+
+    checkMBB->addSuccessor(yieldMBB, BranchProbability::getZero());
+    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    yieldMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    entryMBB = checkMBB;
+  }
+
+  // Emit stack checking after check-point polling, to wrap the check-point inside stack checking.
+  if (MF.shouldEmitStackCheckROG() && MFI.needsSplitStackProlog()) {
+    uint64_t StackSize = MFI.getStackSize();
+    MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+    for (const auto &LI : entryMBB->liveins()) {
+      allocMBB->addLiveIn(LI);
+      checkMBB->addLiveIn(LI);
+    }
+
+    MF.push_back(allocMBB);
+    MF.push_front(checkMBB);
+
+    // When the frame size is less than the red-zone we just compare the stack
+    // boundary directly to the value of the stack pointer.
+    if (StackSize >= kROGStackRedZoneSize) {
+      BuildMI(checkMBB, DL, TII.get(X86::LEA64r), X86::R11)
+        .addUse(X86::RSP)
+        .addImm(1)
+        .addReg(0)
+        .addImm(-StackSize)
+        .addReg(0);
+    }
+
+    int64_t Offset;
+    unsigned SegReg;
+
+    switch (STI.getTargetTriple().getOS()) {
+      default: {
+        report_fatal_error("ROG Stack Growing not supported on this platform.");
+      }
+
+      /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
+      * one of the reserved slot within `tcbhead_t` for stack limit.
+      * Also, there is a `_Static_assert` to ensure the offset was right,
+      * so we are safe here.
+      * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
+      case Triple::Linux: {
+        Offset = 0x80;
+        SegReg = X86::FS;
+        break;
+      }
+
+      /* Uses %gs segment and hard-coded slot 6 for stack limit.
+      * See: https://github.com/golang/go/issues/23617 */
+      case Triple::Darwin:
+      case Triple::MacOSX: {
+        Offset = 0x30;
+        SegReg = X86::GS;
+        break;
+      }
+    }
+
+    BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
+      .addUse(StackSize < kROGStackRedZoneSize ? X86::RSP : X86::R11)
+      .addReg(0)
+      .addImm(1)
+      .addReg(0)
+      .addImm(Offset)
+      .addReg(SegReg);
+
+    BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
+      .addMBB(allocMBB)
+      .addImm(X86::COND_BE);
+
+    if (StackSize < kROGStackRedZoneSize) {
+      BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::R11)
+        .addUse(X86::RSP)
+        .addImm(1)
+        .addReg(0)
+        .addImm(-StackSize)
+        .addReg(0);
+    } else {
+      allocMBB->addLiveIn(X86::R11);
+      allocMBB->sortUniqueLiveIns();
+    }
+
+    BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+      .addUse(X86::R11, RegState::ImplicitKill)
+      .addExternalSymbol(kROGStackCheckFn);
+
+    BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
+      .addMBB(entryMBB);
+
+    checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+    allocMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+  }
+
+#ifdef EXPENSIVE_CHECKS
+  MF.verify();
+#endif
+}
+
 /// Lookup an ERTS parameter in the !hipe.literals named metadata node.
 /// HiPE provides Erlang Runtime System-internal parameters, such as PCB offsets
 /// to fields it needs, through a named metadata node "hipe.literals" containing
@@ -3553,6 +3718,7 @@ void X86FrameLowering::adjustForHiPEPrologue(
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+  assert(MF.getFunction().getCallingConv() == CallingConv::HiPE && "Calling convention must be HiPE");
 
   // HiPE-specific values
   NamedMDNode *HiPELiteralsMD =
@@ -3921,9 +4087,11 @@ bool X86FrameLowering::enableShrinkWrapping(const MachineFunction &MF) const {
          // The lowering of segmented stack and HiPE only support entry
          // blocks as prologue blocks: PR26107. This limitation may be
          // lifted if we fix:
+         // - adjustForStackCheckROG
          // - adjustForSegmentedStacks
          // - adjustForHiPEPrologue
          MF.getFunction().getCallingConv() != CallingConv::HiPE &&
+         !MF.shouldEmitStackCheckROG() &&
          !MF.shouldSplitStack();
 }
 

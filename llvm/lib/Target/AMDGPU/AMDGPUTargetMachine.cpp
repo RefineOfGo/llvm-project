@@ -1119,6 +1119,7 @@ AMDGPUPassConfig::AMDGPUPassConfig(TargetMachine &TM, PassManagerBase &PM)
   disablePass(&StackMapLivenessID);
   disablePass(&FuncletLayoutID);
   // Garbage collection is not supported.
+  disablePass(&ROGGCLoweringID);
   disablePass(&GCLoweringID);
   disablePass(&ShadowStackGCLoweringID);
 }

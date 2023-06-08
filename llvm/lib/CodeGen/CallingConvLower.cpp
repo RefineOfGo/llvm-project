@@ -265,11 +265,11 @@ bool CCState::resultsCompatible(CallingConv::ID CalleeCC,
                                 CCAssignFn CalleeFn, CCAssignFn CallerFn) {
   if (CalleeCC == CallerCC)
     return true;
-  SmallVector<CCValAssign, 4> RVLocs1;
+  SmallVector<CCValAssign, 8> RVLocs1;
   CCState CCInfo1(CalleeCC, false, MF, RVLocs1, C);
   CCInfo1.AnalyzeCallResult(Ins, CalleeFn);
 
-  SmallVector<CCValAssign, 4> RVLocs2;
+  SmallVector<CCValAssign, 8> RVLocs2;
   CCState CCInfo2(CallerCC, false, MF, RVLocs2, C);
   CCInfo2.AnalyzeCallResult(Ins, CallerFn);
 

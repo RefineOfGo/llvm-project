@@ -27,6 +27,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
@@ -96,6 +97,10 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   case CallingConv::PreserveNone:
     // FIXME: Windows likely need this to be altered for properly unwinding.
     return CSR_AArch64_NoneRegs_SaveList;
+
+  case CallingConv::Cold:
+  case CallingConv::ROG_Cold:
+    return Darwin ? CSR_Darwin_AArch64_Cold_SaveList : CSR_AArch64_Cold_SaveList;
 
   case CallingConv::AnyReg:
     return CSR_AArch64_AllRegs_SaveList;
@@ -279,6 +284,13 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
                : CSR_AArch64_NoneRegs_RegMask;
   if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
+
+  // "coldcc" or "rog_coldcc" does not support stack shadowing.
+  if (CC == CallingConv::Cold || CC == CallingConv::ROG_Cold) {
+    if (SCS)
+      report_fatal_error("ShadowCallStack attribute not available for coldcc.");
+    return CSR_AArch64_Cold_RegMask;
+  }
 
   // All the following calling conventions are handled differently on Darwin.
   if (MF.getSubtarget<AArch64Subtarget>().isTargetDarwin()) {
@@ -689,7 +701,10 @@ bool AArch64RegisterInfo::isArgumentRegister(const MachineFunction &MF,
       return HasReg(CC_AArch64_Preserve_None_ArgRegs, Reg);
     [[fallthrough]];
   case CallingConv::C:
+  case CallingConv::ROG:
+  case CallingConv::ROG_Cold:
   case CallingConv::Fast:
+  case CallingConv::Cold:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:
   case CallingConv::CXX_FAST_TLS:

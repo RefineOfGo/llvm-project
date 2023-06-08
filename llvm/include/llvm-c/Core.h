@@ -4856,6 +4856,15 @@ LLVM_C_ABI LLVMValueRef LLVMBuildMemSet(LLVMBuilderRef B, LLVMValueRef Ptr,
                                         LLVMValueRef Val, LLVMValueRef Len,
                                         unsigned Align);
 /**
+ * Creates and inserts a gcmemset to the specified pointer and the
+ * specified value.
+ *
+ * @see llvm::IRRBuilder::CreateGCMemSet()
+ */
+LLVMValueRef LLVMBuildGCMemSet(LLVMBuilderRef B, LLVMValueRef Ptr,
+                               LLVMValueRef Val, LLVMValueRef Len,
+                               unsigned Align);
+/**
  * Creates and inserts a memcpy between the specified pointers.
  *
  * @see llvm::IRRBuilder::CreateMemCpy()
@@ -4864,6 +4873,15 @@ LLVM_C_ABI LLVMValueRef LLVMBuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst,
                                         unsigned DstAlign, LLVMValueRef Src,
                                         unsigned SrcAlign, LLVMValueRef Size);
 /**
+ * Creates and inserts a gcmemcpy between the specified pointers.
+ *
+ * @see llvm::IRRBuilder::CreateGCMemCpy()
+ */
+LLVMValueRef LLVMBuildGCMemCpy(LLVMBuilderRef B,
+                               LLVMValueRef Dst, unsigned DstAlign,
+                               LLVMValueRef Src, unsigned SrcAlign,
+                               LLVMValueRef Size);
+/**
  * Creates and inserts a memmove between the specified pointers.
  *
  * @see llvm::IRRBuilder::CreateMemMove()
@@ -4871,6 +4889,16 @@ LLVM_C_ABI LLVMValueRef LLVMBuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst,
 LLVM_C_ABI LLVMValueRef LLVMBuildMemMove(LLVMBuilderRef B, LLVMValueRef Dst,
                                          unsigned DstAlign, LLVMValueRef Src,
                                          unsigned SrcAlign, LLVMValueRef Size);
+
+/**
+ * Creates and inserts a gcmemmove between the specified pointers.
+ *
+ * @see llvm::IRRBuilder::CreateGCMemMove()
+ */
+LLVM_C_ABI LLVMValueRef LLVMBuildGCMemMove(LLVMBuilderRef B,
+                                           LLVMValueRef Dst, unsigned DstAlign,
+                                           LLVMValueRef Src, unsigned SrcAlign,
+                                           LLVMValueRef Size);
 
 LLVM_C_ABI LLVMValueRef LLVMBuildAlloca(LLVMBuilderRef, LLVMTypeRef Ty,
                                         const char *Name);

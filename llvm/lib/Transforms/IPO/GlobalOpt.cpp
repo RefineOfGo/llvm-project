@@ -1717,7 +1717,9 @@ static bool hasChangeableCCImpl(Function *F) {
   CallingConv::ID CC = F->getCallingConv();
 
   // FIXME: Is it worth transforming x86_stdcallcc and x86_fastcallcc?
-  if (CC != CallingConv::C && CC != CallingConv::X86_ThisCall)
+  if (CC != CallingConv::C &&
+      CC != CallingConv::ROG &&
+      CC != CallingConv::X86_ThisCall)
     return false;
 
   if (F->isVarArg())
@@ -1790,10 +1792,16 @@ isValidCandidateForColdCC(Function &F,
 }
 
 static void changeCallSitesToColdCC(Function *F) {
-  for (User *U : F->users())
-    if (auto *Call = dyn_cast<CallBase>(U))
-      if (Call->getCalledOperand() == F)
-        Call->setCallingConv(CallingConv::Cold);
+  for (User *U : F->users()) {
+    if (auto *Call = dyn_cast<CallBase>(U)) {
+      if (Call->getCalledOperand() == F) {
+        if (Call->getCallingConv() == CallingConv::ROG)
+          Call->setCallingConv(CallingConv::ROG_Cold);
+        else
+          Call->setCallingConv(CallingConv::Cold);
+      }
+    }
+  }
 }
 
 // This function iterates over all the call instructions in the input Function
@@ -2017,14 +2025,17 @@ OptimizeFunctions(Module &M,
           (TTI.useColdCCForColdCall(F) &&
            isValidCandidateForColdCC(F, GetBFI, AllCallsCold))) {
         ChangeableCCCache.erase(&F);
-        F.setCallingConv(CallingConv::Cold);
+        if (F.getCallingConv() == CallingConv::ROG)
+          F.setCallingConv(CallingConv::ROG_Cold);
+        else
+          F.setCallingConv(CallingConv::Cold);
         changeCallSitesToColdCC(&F);
         Changed = true;
         NumColdCC++;
       }
     }
 
-    if (hasChangeableCC(&F, ChangeableCCCache)) {
+    if (hasChangeableCC(&F, ChangeableCCCache) && F.getCallingConv() != CallingConv::ROG) {
       // If this function has a calling convention worth changing, is not a
       // varargs function, is only called directly, and is supported by the
       // target, promote it to use the Fast calling convention.

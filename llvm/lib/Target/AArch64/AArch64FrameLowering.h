@@ -59,6 +59,9 @@ public:
 
   bool enableFullCFIFixup(const MachineFunction &MF) const override;
 
+  void adjustForROGPrologue(MachineFunction &MF,
+                            MachineBasicBlock &PrologueMBB) const override;
+
   bool canUseAsPrologue(const MachineBasicBlock &MBB) const override;
 
   StackOffset getFrameIndexReference(const MachineFunction &MF, int FI,

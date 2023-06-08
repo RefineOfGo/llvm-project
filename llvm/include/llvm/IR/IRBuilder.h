@@ -622,6 +622,10 @@ public:
   // Intrinsic creation methods
   //===--------------------------------------------------------------------===//
 
+  CallInst *CreateGCWrite(Value *Val, Value *Obj, Value *Ptr,
+                          bool isVolatile = false,
+                          const AAMDNodes &AAInfo = AAMDNodes());
+
   /// Create and insert a memset to the specified pointer and the
   /// specified value.
   ///
@@ -633,14 +637,35 @@ public:
     return CreateMemSet(Ptr, Val, getInt64(Size), Align, isVolatile, AAInfo);
   }
 
-  LLVM_ABI CallInst *CreateMemSet(Value *Ptr, Value *Val, Value *Size,
-                                  MaybeAlign Align, bool isVolatile = false,
-                                  const AAMDNodes &AAInfo = AAMDNodes());
+  CallInst *CreateGCMemSet(Value *Ptr, Value *Val, uint64_t Size,
+                           MaybeAlign Align, bool isVolatile = false,
+                           const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateGCMemSet(Ptr, Val, getInt64(Size), Align, isVolatile, AAInfo);
+  }
 
-  LLVM_ABI CallInst *CreateMemSetInline(Value *Dst, MaybeAlign DstAlign,
-                                        Value *Val, Value *Size,
-                                        bool IsVolatile = false,
-                                        const AAMDNodes &AAInfo = AAMDNodes());
+  CallInst *CreateMemSet(Value *Ptr, Value *Val, Value *Size,
+                         MaybeAlign Align, bool isVolatile = false,
+                         const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateMemSet(Intrinsic::memset, Ptr, Val, Size, Align, isVolatile, AAInfo);
+  }
+
+  CallInst *CreateGCMemSet(Value *Ptr, Value *Val, Value *Size, MaybeAlign Align,
+                           bool isVolatile = false,
+                           const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateMemSet(Intrinsic::gcmemset, Ptr, Val, Size, Align, isVolatile, AAInfo);
+  }
+
+  CallInst *CreateMemSetInline(Value *Dst, MaybeAlign DstAlign, Value *Val,
+                               Value *Size, bool isVolatile = false,
+                               const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateMemSet(Intrinsic::memset_inline, Dst, Val, Size, DstAlign,
+                        isVolatile, AAInfo);
+  }
+
+  LLVM_ABI CallInst *CreateMemSet(Intrinsic::ID IntrID, Value *Ptr, Value *Val,
+                                  Value *Size, MaybeAlign Align,
+                                  bool isVolatile = false,
+                                  const AAMDNodes &AAInfo = AAMDNodes());
 
   /// Create and insert an element unordered-atomic memset of the region of
   /// memory starting at the given pointer to the given value.
@@ -692,6 +717,14 @@ public:
                         isVolatile, AAInfo);
   }
 
+  CallInst *CreateGCMemCpy(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                           MaybeAlign SrcAlign, uint64_t Size,
+                           bool isVolatile = false,
+                           const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateGCMemCpy(Dst, DstAlign, Src, SrcAlign, getInt64(Size),
+                          isVolatile, AAInfo);
+  }
+
   LLVM_ABI CallInst *
   CreateMemTransferInst(Intrinsic::ID IntrID, Value *Dst, MaybeAlign DstAlign,
                         Value *Src, MaybeAlign SrcAlign, Value *Size,
@@ -711,6 +744,14 @@ public:
                                bool isVolatile = false,
                                const AAMDNodes &AAInfo = AAMDNodes()) {
     return CreateMemTransferInst(Intrinsic::memcpy_inline, Dst, DstAlign, Src,
+                                 SrcAlign, Size, isVolatile, AAInfo);
+  }
+
+  CallInst *CreateGCMemCpy(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                           MaybeAlign SrcAlign, Value *Size,
+                           bool isVolatile = false,
+                           const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateMemTransferInst(Intrinsic::memcpy, Dst, DstAlign, Src,
                                  SrcAlign, Size, isVolatile, AAInfo);
   }
 
@@ -734,11 +775,27 @@ public:
                          isVolatile, AAInfo);
   }
 
+  CallInst *CreateGCMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                            MaybeAlign SrcAlign, uint64_t Size,
+                            bool isVolatile = false,
+                            const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateGCMemMove(Dst, DstAlign, Src, SrcAlign, getInt64(Size),
+                           isVolatile, AAInfo);
+  }
+
   CallInst *CreateMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
                           MaybeAlign SrcAlign, Value *Size,
                           bool isVolatile = false,
                           const AAMDNodes &AAInfo = AAMDNodes()) {
     return CreateMemTransferInst(Intrinsic::memmove, Dst, DstAlign, Src,
+                                 SrcAlign, Size, isVolatile, AAInfo);
+  }
+
+  CallInst *CreateGCMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                            MaybeAlign SrcAlign, Value *Size,
+                            bool isVolatile = false,
+                            const AAMDNodes &AAInfo = AAMDNodes()) {
+    return CreateMemTransferInst(Intrinsic::gcmemmove, Dst, DstAlign, Src,
                                  SrcAlign, Size, isVolatile, AAInfo);
   }
 

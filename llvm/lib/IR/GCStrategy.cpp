@@ -14,6 +14,7 @@
 #include "llvm/IR/GCStrategy.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/BuiltinGCs.h"
+#include "llvm/IR/ROGGC.h"
 
 using namespace llvm;
 
@@ -35,6 +36,7 @@ std::unique_ptr<GCStrategy> llvm::getGCStrategy(const StringRef Name) {
   // obviously can't be removed by the linker, and here it won't affect
   // performance, since there's about to be a fatal error anyway.
   llvm::linkAllBuiltinGCs();
+  llvm::linkROGGC();
 
   if (GCRegistry::begin() == GCRegistry::end()) {
     // In normal operation, the registry should not be empty.  There should

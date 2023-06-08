@@ -92,6 +92,10 @@ bool KCFI::runOnMachineFunction(MachineFunction &MF) {
   if (!M->getModuleFlag("kcfi"))
     return false;
 
+  if (MF.getFunction().getCallingConv() == CallingConv::ROG ||
+      MF.getFunction().getCallingConv() == CallingConv::ROG_Cold)
+    report_fatal_error("ROG calling conventions do not support KCFI");
+
   const auto &SubTarget = MF.getSubtarget();
   TII = SubTarget.getInstrInfo();
   TLI = SubTarget.getTargetLowering();

@@ -370,6 +370,23 @@ LLVM_ABI extern char &MIRCanonicalizerID;
 /// memory operations.
 LLVM_ABI extern char &ImplicitNullChecksID;
 
+/// ROGGCLowering - Implements the custom lowering mechanism used by
+/// the ROG GC.  Only runs on functions which opt in to the ROG collector.
+LLVM_ABI FunctionPass *createROGGCLoweringPass();
+
+/// ROGGCLowering - Implements the custom lowering mechanism used by
+/// the ROG GC.
+LLVM_ABI extern char &ROGGCLoweringID;
+
+/// ROGStackCheckPreparing - Preparations for ROG Stack Check prologue.
+LLVM_ABI ModulePass *createROGStackCheckPreparingPass();
+
+/// GCMachineCodeAnalysis - Target-independent pass to mark safe points
+/// in machine code. Must be added very late during code generation, just
+/// prior to output, and importantly after all CFG transformations (such as
+/// branch folding).
+LLVM_ABI extern char &GCMachineCodeAnalysisID;
+
 /// This pass performs loop invariant code motion on machine instructions.
 LLVM_ABI extern char &MachineLICMID;
 

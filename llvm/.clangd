@@ -1,0 +1,6 @@
+Diagnostics:
+  Suppress:
+    - llvm-else-after-return
+    - llvm-namespace-comment
+    - readability-identifier-naming
+    - unused-includes

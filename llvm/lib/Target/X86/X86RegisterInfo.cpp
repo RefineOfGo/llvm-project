@@ -272,6 +272,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     if (HasAVX)
       return CSR_64_AllRegs_AVX_SaveList;
     return CSR_64_AllRegs_SaveList;
+  case CallingConv::ROG_Cold:
   case CallingConv::PreserveMost:
     if (IsWin64)
       return HasEGPR ? CSR_Win64_APX_RT_MostRegs_SaveList
@@ -413,6 +414,7 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     if (HasAVX)
       return CSR_64_AllRegs_AVX_RegMask;
     return CSR_64_AllRegs_RegMask;
+  case CallingConv::ROG_Cold:
   case CallingConv::PreserveMost:
     if (IsWin64)
       return HasEGPR ? CSR_Win64_APX_RT_MostRegs_RegMask

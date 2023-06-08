@@ -66,6 +66,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 #include <cassert>
@@ -348,7 +349,6 @@ DenormalMode MachineFunction::getDenormalMode(const fltSemantics &FPType) const 
   return F.getDenormalMode(FPType);
 }
 
-/// Should we be emitting segmented stack stuff for the function
 bool MachineFunction::shouldSplitStack() const {
   return getFunction().hasFnAttribute("split-stack");
 }
@@ -364,6 +364,14 @@ Align MachineFunction::getPreferredAlignment() const {
     PrefAlignment = Align(1);
 
   return std::max(PrefAlignment, getAlignment());
+}
+
+bool MachineFunction::shouldEmitStackCheckROG() const {
+  return getFunction().hasFnAttribute(kROGStackCheckAttr);
+}
+
+bool MachineFunction::shouldEmitCheckPointROG() const {
+  return getFunction().hasFnAttribute(kROGCheckpointAttr);
 }
 
 [[nodiscard]] unsigned

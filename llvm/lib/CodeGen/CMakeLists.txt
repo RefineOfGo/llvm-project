@@ -200,6 +200,8 @@ add_llvm_component_library(LLVMCodeGen
   Rematerializer.cpp
   RemoveRedundantDebugValues.cpp
   RenameIndependentSubregs.cpp
+  ROGGCLowering.cpp
+  ROGStackCheckPreparing.cpp
   MachineStableHash.cpp
   MIRVRegNamerUtils.cpp
   MIRNamerPass.cpp

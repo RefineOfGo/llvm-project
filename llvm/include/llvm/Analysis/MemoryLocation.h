@@ -28,12 +28,12 @@ class CallBase;
 class Instruction;
 class LoadInst;
 class StoreInst;
-class MemTransferInst;
 class MemIntrinsic;
 class AtomicCmpXchgInst;
 class AtomicRMWInst;
 class AnyMemTransferInst;
 class AnyMemIntrinsic;
+class MemTransferInst;
 class TargetLibraryInfo;
 class VAArgInst;
 

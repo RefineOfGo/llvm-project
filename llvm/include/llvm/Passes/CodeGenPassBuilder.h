@@ -82,6 +82,7 @@
 #include "llvm/CodeGen/RemoveRedundantDebugValues.h"
 #include "llvm/CodeGen/RenameIndependentSubregs.h"
 #include "llvm/CodeGen/ReplaceWithVeclib.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/CodeGen/SafeStack.h"
 #include "llvm/CodeGen/SanitizerBinaryMetadata.h"
 #include "llvm/CodeGen/SelectOptimize.h"
@@ -703,10 +704,10 @@ void CodeGenPassBuilder<Derived, TargetMachineT>::addISelPasses(
 
   // ObjCARCContract operates on ObjC intrinsics and must run before
   // PreISelIntrinsicLowering.
-  if (getOptLevel() != CodeGenOptLevel::None) {
+  if (getOptLevel() != CodeGenOptLevel::None)
     addFunctionPass(ObjCARCContractPass(), PMW);
-    flushFPMsToMPM(PMW);
-  }
+  addFunctionPass(ROGGCLoweringPass(), PMW);
+  flushFPMsToMPM(PMW);
   addModulePass(PreISelIntrinsicLoweringPass(&TM), PMW);
   addFunctionPass(ExpandIRInstsPass(TM, getOptLevel()), PMW);
 

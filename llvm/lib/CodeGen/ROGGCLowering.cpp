@@ -124,7 +124,7 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
 
             /* emit instructions for either cases */
             new StoreInst(val, mem, false, Align::Of<void **>(), other);
-            CallInst::Create(FunctionCallee(wbfn), ArrayRef<Value *>({ mem, val }), "", then);
+            CallInst::Create(wbfn, ArrayRef<Value *>({ mem, val }), "", then);
             break;
         }
     }

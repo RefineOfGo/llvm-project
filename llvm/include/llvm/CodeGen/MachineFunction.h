@@ -852,6 +852,9 @@ public:
     return MBBNumbering[N];
   }
 
+  /// Should we be emitting stack growing stuff for the function (ROG-specific)
+  bool shouldGrowStackROG() const;
+
   /// Should we be emitting segmented stack stuff for the function
   bool shouldSplitStack() const;
 

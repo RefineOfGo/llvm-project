@@ -324,6 +324,11 @@ DenormalMode MachineFunction::getDenormalMode(const fltSemantics &FPType) const 
   return F.getDenormalMode(FPType);
 }
 
+/// Should we be emitting stack growing stuff for the function (ROG-specific)
+bool MachineFunction::shouldGrowStackROG() const {
+  return getFunction().hasFnAttribute("rog-stack-check");
+}
+
 /// Should we be emitting segmented stack stuff for the function
 bool MachineFunction::shouldSplitStack() const {
   return getFunction().hasFnAttribute("split-stack");

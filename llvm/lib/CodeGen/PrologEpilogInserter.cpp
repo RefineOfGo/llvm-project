@@ -1186,6 +1186,10 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
   for (MachineBasicBlock *SaveBlock : SaveBlocks)
     TFI.inlineStackProbe(MF, *SaveBlock);
 
+  // The two options are mutually exclusive.
+  if (MF.shouldSplitStack() && MF.shouldGrowStackROG())
+    report_fatal_error("ROG Stack Growing conflicts with Segmented Stack.");
+
   // Emit additional code that is required to support segmented stacks, if
   // we've been asked for it.  This, when linked with a runtime with support
   // for segmented stacks (libgcc is one), will result in allocating stack
@@ -1194,6 +1198,13 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
+
+  // Emit additional code that is required to support stack-growing, if we've
+  // been asked for it.  This is like segmented stacks, but grows the entire
+  // stack rather than splitting into small chunks.
+  if (MF.shouldGrowStackROG())
+    for (MachineBasicBlock *SaveBlock : SaveBlocks)
+      TFI.adjustForROGStackGrowing(MF, *SaveBlock);
 
   // Emit additional code that is required to explicitly handle the stack in
   // HiPE native code (if needed) when loaded in the Erlang/OTP runtime. The

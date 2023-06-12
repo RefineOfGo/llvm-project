@@ -3403,6 +3403,90 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
+static const char *       kROGMoreStackFn      = "rog_morestack_abi";
+static const uint64_t     kROGStackRedZone     = 256;
+static const unsigned int kROGStackLimitOffset = 16;
+static const unsigned int kROGCurrentGRegister = X86::R15;
+
+void X86FrameLowering::adjustForROGStackGrowing(
+    MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
+  // To support shrink-wrapping we would need to insert the new blocks
+  // at the right place and update the branches to PrologueMBB.
+  assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+
+  if (MF.getFunction().isVarArg())
+    report_fatal_error("ROG Stack Growing do not support vararg functions.");
+
+  if (!IsLP64 || !Is64Bit || (!STI.isTargetLinux() && !STI.isTargetDarwin() && !STI.isTargetFreeBSD()))
+    report_fatal_error("ROG Stack Growing not supported on this platform.");
+
+  if (HasNestArgument(&MF))
+    report_fatal_error("ROG Stack Growing do not support nested functions.");
+
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  uint64_t StackSize = MFI.getStackSize();
+
+  if (!MFI.needsSplitStackProlog())
+    return;
+
+  MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+  for (const auto &LI : PrologueMBB.liveins()) {
+    allocMBB->addLiveIn(LI);
+    checkMBB->addLiveIn(LI);
+  }
+
+  MF.push_back(allocMBB);
+  MF.push_front(checkMBB);
+
+  // When the frame size is less than the red-zone we just compare the stack
+  // boundary directly to the value of the stack pointer.
+  DebugLoc DL;
+  unsigned int StackPtr = StackSize >= kROGStackRedZone ? X86::RAX : X86::RSP;
+
+  if (StackSize >= kROGStackRedZone) {
+    BuildMI(checkMBB, DL, TII.get(X86::LEA64r), StackPtr)
+      .addReg(X86::RSP)
+      .addImm(1)
+      .addReg(0)
+      .addImm(-StackSize)
+      .addReg(0);
+  }
+
+  BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
+    .addReg(StackPtr)
+    .addReg(kROGCurrentGRegister)
+    .addImm(1)
+    .addReg(0)
+    .addImm(kROGStackLimitOffset)
+    .addReg(0);
+
+  BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
+    .addMBB(allocMBB)
+    .addImm(X86::COND_BE);
+
+  if (StackSize < kROGStackRedZone) {
+    BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::RAX)
+      .addReg(X86::RSP)
+      .addImm(1)
+      .addReg(0)
+      .addImm(-StackSize)
+      .addReg(0);
+  }
+
+  BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+    .addExternalSymbol(kROGMoreStackFn);
+
+  checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+  checkMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+  allocMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+
+#ifdef EXPENSIVE_CHECKS
+  MF.verify();
+#endif
+}
+
 /// Lookup an ERTS parameter in the !hipe.literals named metadata node.
 /// HiPE provides Erlang Runtime System-internal parameters, such as PCB offsets
 /// to fields it needs, through a named metadata node "hipe.literals" containing

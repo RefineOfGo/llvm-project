@@ -3,6 +3,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -95,28 +96,21 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
             assert(wbfn != nullptr && "Barrier function \"" FUNC_NAME "\" does not exist!");
             assert(wbvar != nullptr && "Barrier state variable \"" VAR_NAME "\" does not exist!");
 
-            /* resolve the types */
-            Type *        i8  = Type::getInt8Ty(ctx);
-            Type *        i32 = Type::getInt32Ty(ctx);
-            Instruction * then;
-            Instruction * other;
-
             /* load and test the write barrier flags */
             CmpInst *cond = CmpInst::Create(
                 Instruction::ICmp,
                 CmpInst::ICMP_NE,
-                new LoadInst(i8, wbvar, "", true, ir),
-                ConstantInt::get(i8, 0),
+                new LoadInst(Type::getInt8Ty(ctx), wbvar, "", true, ir),
+                ConstantInt::get(Type::getInt8Ty(ctx), 0),
                 "",
                 ir
             );
 
             /* construct a branch weight that represents "very unlikely" */
-            MDNode *weights = MDNode::get(ctx, ArrayRef<Metadata *>({
-                MDString::get(ctx, "branch_weights"),
-                ConstantAsMetadata::get(ConstantInt::get(i32, 0)),
-                ConstantAsMetadata::get(ConstantInt::get(i32, UINT32_MAX)),
-            }));
+            MDBuilder     mb      = ctx;
+            Instruction * then    = nullptr;
+            Instruction * other   = nullptr;
+            MDNode *      weights = mb.createBranchWeights(ArrayRef<uint32_t>({ 1, INT32_MAX >> 1 }));
 
             /* insert the write barrier */
             SplitBlockAndInsertIfThenElse(cond, ir, &then, &other, weights);

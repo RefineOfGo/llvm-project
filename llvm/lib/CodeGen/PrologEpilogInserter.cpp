@@ -1199,12 +1199,13 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
 
-  // Emit additional code that is required to support stack-growing, if we've
+  // Emit additional code that is required to support growing stacks, if we've
   // been asked for it.  This is like segmented stacks, but grows the entire
   // stack rather than splitting into small chunks.
-  if (MF.shouldGrowStackROG())
+  if (MF.shouldGrowStackROG()) {
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
-      TFI.adjustForROGStackGrowing(MF, *SaveBlock);
+      TFI.adjustForROGPrologue(MF, *SaveBlock);
+  }
 
   // Emit additional code that is required to explicitly handle the stack in
   // HiPE native code (if needed) when loaded in the Erlang/OTP runtime. The

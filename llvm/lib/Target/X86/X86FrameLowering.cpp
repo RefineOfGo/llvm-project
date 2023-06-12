@@ -33,6 +33,7 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LEB128.h"
+#include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cstdlib>
 
@@ -3403,12 +3404,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
-static const char *       kROGMoreStackFn      = "rog_morestack_abi";
-static const uint64_t     kROGStackRedZone     = 256;
-static const unsigned int kROGStackLimitOffset = 16;
-static const unsigned int kROGCurrentGRegister = X86::R15;
-
-void X86FrameLowering::adjustForROGStackGrowing(
+void X86FrameLowering::adjustForROGPrologue(
     MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
@@ -3456,7 +3452,7 @@ void X86FrameLowering::adjustForROGStackGrowing(
 
   BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
     .addReg(StackPtr)
-    .addReg(kROGCurrentGRegister)
+    .addReg(kROGCurrentGRegisterX86)
     .addImm(1)
     .addReg(0)
     .addImm(kROGStackLimitOffset)

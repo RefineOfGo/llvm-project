@@ -223,6 +223,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cassert>
@@ -2483,6 +2484,80 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
 bool AArch64FrameLowering::enableCFIFixup(MachineFunction &MF) const {
   return TargetFrameLowering::enableCFIFixup(MF) &&
          MF.getInfo<AArch64FunctionInfo>()->needsAsyncDwarfUnwindInfo(MF);
+}
+
+void AArch64FrameLowering::adjustForROGPrologue(
+    MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
+  // To support shrink-wrapping we would need to insert the new blocks
+  // at the right place and update the branches to PrologueMBB.
+  const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
+  assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+
+  if (MF.getFunction().isVarArg())
+    report_fatal_error("ROG Stack Growing do not support vararg functions.");
+
+  if (!Subtarget.isTargetLinux() && !Subtarget.isTargetDarwin())
+    report_fatal_error("ROG Stack Growing not supported on this platform.");
+
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  uint64_t StackSize = MFI.getStackSize();
+
+  if (!MFI.needsSplitStackProlog())
+    return;
+
+  MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+
+  for (const auto &LI : PrologueMBB.liveins()) {
+    allocMBB->addLiveIn(LI);
+    checkMBB->addLiveIn(LI);
+  }
+
+  MF.push_back(allocMBB);
+  MF.push_front(checkMBB);
+
+  // When the frame size is less than the red-zone we just compare the stack
+  // boundary directly to the value of the stack pointer.
+  DebugLoc DL;
+  unsigned int StackPtr = StackSize >= kROGStackRedZone ? AArch64::X16 : AArch64::SP;
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+
+  if (StackSize >= kROGStackRedZone) {
+    BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), StackPtr)
+      .addReg(AArch64::SP)
+      .addImm(StackSize)
+      .addImm(0);
+  }
+
+  BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+    .addReg(kROGCurrentGRegisterAArch64)
+    .addImm(kROGStackLimitOffset >> 3);
+
+  BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
+    .addReg(StackPtr)
+    .addReg(AArch64::X17, RegState::Kill);
+
+  BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))
+    .addImm(AArch64CC::LS)
+    .addMBB(allocMBB);
+
+  if (StackSize < kROGStackRedZone) {
+    BuildMI(allocMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+      .addReg(AArch64::SP)
+      .addImm(StackSize)
+      .addImm(0);
+  }
+
+  BuildMI(allocMBB, DL, TII->get(AArch64::BL))
+    .addExternalSymbol(kROGMoreStackFn);
+
+  checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+  checkMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+  allocMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+
+#ifdef EXPENSIVE_CHECKS
+  MF.verify();
+#endif
 }
 
 /// getFrameIndexReference - Provide a base+offset reference to an FI slot for

@@ -36,6 +36,8 @@ public:
   void emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const override;
 
   bool enableCFIFixup(MachineFunction &MF) const override;
+  void adjustForROGPrologue(MachineFunction &MF,
+                            MachineBasicBlock &PrologueMBB) const override;
 
   bool canUseAsPrologue(const MachineBasicBlock &MBB) const override;
 

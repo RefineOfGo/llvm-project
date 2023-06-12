@@ -246,10 +246,10 @@ public:
   virtual void adjustForSegmentedStacks(MachineFunction &MF,
                                         MachineBasicBlock &PrologueMBB) const {}
 
-  /// Adjust the prologue to have the function use stack-growing for ROG. This
-  /// works by adding a check before the ROG function prologue.
-  virtual void adjustForROGStackGrowing(MachineFunction &MF,
-                                        MachineBasicBlock &PrologueMBB) const {}
+  /// Adjust the prologue to add ROG runtime specific code in the assembly
+  /// prologue to explicitly handle the stack.
+  virtual void adjustForROGPrologue(MachineFunction &MF,
+                                    MachineBasicBlock &PrologueMBB) const {}
 
   /// Adjust the prologue to add Erlang Run-Time System (ERTS) specific code in
   /// the assembly prologue to explicitly handle the stack.

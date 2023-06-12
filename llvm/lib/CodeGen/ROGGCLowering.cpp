@@ -106,7 +106,7 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
                 Instruction::ICmp,
                 CmpInst::ICMP_NE,
                 new LoadInst(i8, wbvar, "", true, ir),
-                ConstantInt::get(i8, APInt::getZero(8)),
+                ConstantInt::get(i8, 0),
                 "",
                 ir
             );
@@ -114,8 +114,8 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
             /* construct a branch weight that represents "very unlikely" */
             MDNode *weights = MDNode::get(ctx, ArrayRef<Metadata *>({
                 MDString::get(ctx, "branch_weights"),
-                ConstantAsMetadata::get(ConstantInt::get(i32, APInt::getZero(32))),
-                ConstantAsMetadata::get(ConstantInt::get(i32, APInt::getMaxValue(32))),
+                ConstantAsMetadata::get(ConstantInt::get(i32, 0)),
+                ConstantAsMetadata::get(ConstantInt::get(i32, UINT32_MAX)),
             }));
 
             /* insert the write barrier */

@@ -35,6 +35,7 @@
 #include "llvm/Support/LEB128.h"
 #include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cstdlib>
 
 #define DEBUG_TYPE "x86-fl"
@@ -3410,11 +3411,20 @@ void X86FrameLowering::adjustForROGPrologue(
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
+  if (!IsLP64 || !Is64Bit)
+    report_fatal_error("ROG Stack Growing not supported on this platform.");
+
   if (MF.getFunction().isVarArg())
     report_fatal_error("ROG Stack Growing do not support vararg functions.");
 
-  if (!IsLP64 || !Is64Bit || (!STI.isTargetLinux() && !STI.isTargetDarwin() && !STI.isTargetFreeBSD()))
-    report_fatal_error("ROG Stack Growing not supported on this platform.");
+  int64_t GuardLoc;
+  unsigned int GuardSeg;
+
+  switch (STI.getTargetTriple().getOS()) {
+    case Triple::Linux  : GuardLoc = -8; GuardSeg = X86::FS; break;
+    case Triple::Darwin : GuardLoc = 48; GuardSeg = X86::GS; break;
+    default             : report_fatal_error("ROG Stack Growing not supported on this platform.");
+  }
 
   if (HasNestArgument(&MF))
     report_fatal_error("ROG Stack Growing do not support nested functions.");
@@ -3439,7 +3449,7 @@ void X86FrameLowering::adjustForROGPrologue(
   // When the frame size is less than the red-zone we just compare the stack
   // boundary directly to the value of the stack pointer.
   DebugLoc DL;
-  unsigned int StackPtr = StackSize >= kROGStackRedZone ? X86::RAX : X86::RSP;
+  unsigned int StackPtr = StackSize < kROGStackRedZone ? X86::RSP : X86::RAX;
 
   if (StackSize >= kROGStackRedZone) {
     BuildMI(checkMBB, DL, TII.get(X86::LEA64r), StackPtr)
@@ -3452,11 +3462,11 @@ void X86FrameLowering::adjustForROGPrologue(
 
   BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
     .addReg(StackPtr)
-    .addReg(kROGCurrentGRegisterX86)
+    .addReg(0)
     .addImm(1)
     .addReg(0)
-    .addImm(kROGStackLimitOffset)
-    .addReg(0);
+    .addImm(GuardLoc)
+    .addReg(GuardSeg);
 
   BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
     .addMBB(allocMBB)

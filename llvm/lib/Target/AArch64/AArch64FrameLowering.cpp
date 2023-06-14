@@ -226,6 +226,7 @@
 #include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -2490,14 +2491,20 @@ void AArch64FrameLowering::adjustForROGPrologue(
     MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
-  const AArch64Subtarget &Subtarget = MF.getSubtarget<AArch64Subtarget>();
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
   if (MF.getFunction().isVarArg())
     report_fatal_error("ROG Stack Growing do not support vararg functions.");
 
-  if (!Subtarget.isTargetLinux() && !Subtarget.isTargetDarwin())
-    report_fatal_error("ROG Stack Growing not supported on this platform.");
+  int64_t Slot;
+  int64_t SysReg;
+  const AArch64Subtarget &ST = MF.getSubtarget<AArch64Subtarget>();
+
+  switch (ST.getTargetTriple().getOS()) {
+    case Triple::Linux  : Slot = 2; SysReg = AArch64SysReg::TPIDR_EL0; break;
+    case Triple::Darwin : Slot = 6; SysReg = AArch64SysReg::TPIDRRO_EL0; break;
+    default             : report_fatal_error("ROG Stack Growing not supported on this platform.");
+  }
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
   uint64_t StackSize = MFI.getStackSize();
@@ -2520,7 +2527,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
   // boundary directly to the value of the stack pointer.
   DebugLoc DL;
   unsigned int StackPtr = StackSize >= kROGStackRedZone ? AArch64::X16 : AArch64::SP;
-  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  const TargetInstrInfo *TII = ST.getInstrInfo();
 
   if (StackSize >= kROGStackRedZone) {
     BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), StackPtr)
@@ -2529,9 +2536,12 @@ void AArch64FrameLowering::adjustForROGPrologue(
       .addImm(0);
   }
 
+  BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17)
+    .addImm(SysReg);
+
   BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
-    .addReg(kROGCurrentGRegisterAArch64)
-    .addImm(kROGStackLimitOffset >> 3);
+    .addReg(AArch64::X17, RegState::Kill)
+    .addImm(Slot);
 
   BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
     .addReg(StackPtr)

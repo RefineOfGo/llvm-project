@@ -16,6 +16,8 @@ using namespace llvm;
 #define FUNC_NAME   "gcWriteBarrier"
 #define DEBUG_TYPE  "rog-gc-lowering"
 
+#define assert_x(x) assert(x)
+
 namespace {
 struct ROGGCLowering : public FunctionPass {
     static char ID;
@@ -88,20 +90,21 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
             assert(obj->getType()->isPtrOrPtrVectorTy() && "Object is not a pointer!");
             assert(mem->getType()->isPtrOrPtrVectorTy() && "Memory slot is not a pointer!");
 
-            /* find the write barrier function and variable */
-            auto *wbfn  = mod->getFunction(FUNC_NAME);
-            auto *wbvar = mod->getGlobalVariable(VAR_NAME, true);
+            /* pointer types */
+            auto *i8 = Type::getInt8Ty(ctx);
+            auto *i8p = PointerType::getUnqual(i8);
+            auto *i8pp = PointerType::getUnqual(i8p);
 
-            /* they must exist */
-            assert(wbfn != nullptr && "Barrier function \"" FUNC_NAME "\" does not exist!");
-            assert(wbvar != nullptr && "Barrier state variable \"" VAR_NAME "\" does not exist!");
+            /* find the write barrier function and variable */
+            auto wbvar  = mod->getOrInsertGlobal(VAR_NAME, Type::getInt8Ty(ctx));
+            auto wbfunc = mod->getOrInsertFunction(FUNC_NAME, Type::getVoidTy(ctx), i8pp, i8p);
 
             /* load and test the write barrier flags */
             CmpInst *cond = CmpInst::Create(
                 Instruction::ICmp,
                 CmpInst::ICMP_NE,
-                new LoadInst(Type::getInt8Ty(ctx), wbvar, "", true, ir),
-                ConstantInt::get(Type::getInt8Ty(ctx), 0),
+                new LoadInst(i8, wbvar, "", true, ir),
+                ConstantInt::get(i8, 0),
                 "",
                 ir
             );
@@ -118,7 +121,7 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
 
             /* emit instructions for either cases */
             new StoreInst(val, mem, false, Align::Of<void **>(), other);
-            CallInst::Create(wbfn, ArrayRef<Value *>({ mem, val }), "", then);
+            CallInst::Create(wbfunc, ArrayRef<Value *>({ mem, val }), "", then);
             break;
         }
     }

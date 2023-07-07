@@ -90,21 +90,24 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
             assert(obj->getType()->isPtrOrPtrVectorTy() && "Object is not a pointer!");
             assert(mem->getType()->isPtrOrPtrVectorTy() && "Memory slot is not a pointer!");
 
+            /* integer types */
+            Type *i8 = Type::getInt8Ty(ctx);
+            Type *i32 = Type::getInt32Ty(ctx);
+
             /* pointer types */
-            auto *i8 = Type::getInt8Ty(ctx);
-            auto *i8p = PointerType::getUnqual(i8);
-            auto *i8pp = PointerType::getUnqual(i8p);
+            Type *i8p = PointerType::getUnqual(i8);
+            Type *i8pp = PointerType::getUnqual(i8p);
 
             /* find the write barrier function and variable */
-            auto wbvar  = mod->getOrInsertGlobal(VAR_NAME, Type::getInt8Ty(ctx));
+            auto wbvar  = mod->getOrInsertGlobal(VAR_NAME, i32);
             auto wbfunc = mod->getOrInsertFunction(FUNC_NAME, Type::getVoidTy(ctx), i8pp, i8p);
 
             /* load and test the write barrier flags */
             CmpInst *cond = CmpInst::Create(
                 Instruction::ICmp,
                 CmpInst::ICMP_NE,
-                new LoadInst(i8, wbvar, "", true, ir),
-                ConstantInt::get(i8, 0),
+                new LoadInst(i32, wbvar, "", true, ir),
+                ConstantInt::get(i32, 0),
                 "",
                 ir
             );

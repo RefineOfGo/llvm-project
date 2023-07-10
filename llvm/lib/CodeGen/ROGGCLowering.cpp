@@ -122,9 +122,14 @@ void ROGGCLowering::lowerWriteBarrier(Function &fn) {
             SplitBlockAndInsertIfThenElse(cond, ir, &then, &other, weights);
             ir->eraseFromParent();
 
-            /* emit instructions for either cases */
-            new StoreInst(val, mem, false, Align::Of<void **>(), other);
-            CallInst::Create(wbfunc, ArrayRef<Value *>({ mem, val }), "", then);
+            /* create instructions for either cases */
+            auto store = new StoreInst(val, mem, false, Align::Of<void **>());
+            auto barrier = CallInst::Create(wbfunc, ArrayRef<Value *>({ mem, val }), "");
+
+            /* insert the instructions, and mark the barrier call as cold */
+            store->insertBefore(other);
+            barrier->insertBefore(then);
+            barrier->setCallingConv(CallingConv::Cold);
             break;
         }
     }

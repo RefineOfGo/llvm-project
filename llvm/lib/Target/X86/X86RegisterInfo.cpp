@@ -353,7 +353,7 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
                    : CSR_Win32_CFGuard_Check_NoSSE_SaveList);
   case CallingConv::Cold:
     if (Is64Bit)
-      return CSR_64_MostRegs_SaveList;
+      return CSR_64_AllRegs_SaveList;
     break;
   case CallingConv::Win64:
     if (!HasSSE)

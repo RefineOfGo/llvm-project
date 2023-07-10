@@ -12,8 +12,8 @@
 using namespace llvm;
 
 #define GC_NAME     "rog"
-#define VAR_NAME    "writeBarrier"
-#define FUNC_NAME   "gcWriteBarrier"
+#define VAR_NAME    "rog_gcwb_enabled"
+#define FUNC_NAME   "rog_gcwb_store_ptr"
 #define DEBUG_TYPE  "rog-gc-lowering"
 
 #define assert_x(x) assert(x)

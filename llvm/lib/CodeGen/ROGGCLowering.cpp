@@ -12,9 +12,8 @@
 using namespace llvm;
 
 #define GC_NAME     "rog"
-#define GCWB_SW     "rog_gcwb_enabled"
-#define GCWB_MARK   "rog_gcwb_mark_atomic"
-#define GCWB_STORE  "rog_gcwb_store_ptr"
+#define GCWB_SW     "rog_gcwb_switch"
+#define GCWB_FN     "rog_write_barrier"
 #define DEBUG_TYPE  "rog-gc-lowering"
 
 #define assert_x(x) assert(x)
@@ -28,17 +27,22 @@ public:
     bool runOnFunction(Function &fn) override;
 
 private:
-    void           barrierCall(FunctionCallee fn, ArrayRef<Value *> args, Instruction *insertBefore);
-    Value *        barrierCond(LLVMContext &ctx, Module *mod, Instruction *insertBefore);
-    FunctionCallee barrierMarkFn(LLVMContext &ctx, Module *mod);
-    FunctionCallee barrierStoreFn(LLVMContext &ctx, Module *mod);
-
-private:
+    void insertGCWB(CallInst *ir, Value *mem, Value *val);
     void replaceStore(CallInst *ir);
     void replaceAtomicCAS(CallInst *ir);
     void replaceAtomicSwap(CallInst *ir);
 };
 }
+
+static llvm::SmallDenseMap<StringRef, AtomicOrdering> AtomicOrderingMap = {
+    { "not_atomic" , AtomicOrdering::NotAtomic              },
+    { "unordered"  , AtomicOrdering::Unordered              },
+    { "monotonic"  , AtomicOrdering::Monotonic              },
+    { "acquire"    , AtomicOrdering::Acquire                },
+    { "release"    , AtomicOrdering::Release                },
+    { "acq_rel"    , AtomicOrdering::AcquireRelease         },
+    { "seq_cst"    , AtomicOrdering::SequentiallyConsistent },
+};
 
 char ROGGCLowering::ID = 0;
 char &llvm::ROGGCLoweringID = ROGGCLowering::ID;
@@ -46,10 +50,6 @@ char &llvm::ROGGCLoweringID = ROGGCLowering::ID;
 INITIALIZE_PASS_BEGIN(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
 INITIALIZE_PASS_DEPENDENCY(GCModuleInfo)
 INITIALIZE_PASS_END(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
-
-static MDNode *makeVeryUnlikely(LLVMContext &ctx) {
-    return MDBuilder(ctx).createBranchWeights({ 1, INT32_MAX >> 1 });
-}
 
 FunctionPass *llvm::createROGGCLoweringPass() {
     return new ROGGCLowering();
@@ -97,89 +97,79 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
         }
     }
 
-    dbgs() << fn << "\n";
     /* align the function to a pointer boundary */
     fn.setAlignment(Align::Of<void *>());
     return madeChanges;
 }
 
-void ROGGCLowering::barrierCall(FunctionCallee fn, ArrayRef<Value *> args, Instruction *insertBefore) {
-    CallInst::Create(fn, args, "", insertBefore)->setCallingConv(CallingConv::Cold);
-}
-
-Value *ROGGCLowering::barrierCond(LLVMContext &ctx, Module *mod, Instruction *insertBefore) {
-    return CmpInst::Create(
-        Instruction::ICmp,
-        CmpInst::ICMP_NE,
-        new LoadInst(
-            Type::getInt32Ty(ctx),
-            mod->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ctx)),
-            "",
-            true,
-            insertBefore
+void ROGGCLowering::insertGCWB(CallInst *ir, Value *mem, Value *val) {
+    CallInst::Create(
+        ir->getModule()->getOrInsertFunction(
+            GCWB_FN,
+            Type::getVoidTy(ir->getContext()),
+            Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
+            Type::getInt8PtrTy(ir->getContext())
         ),
-        ConstantInt::get(Type::getInt32Ty(ctx), 0),
+        { mem, val },
         "",
-        insertBefore
-    );
-}
-
-FunctionCallee ROGGCLowering::barrierMarkFn(LLVMContext &ctx, Module *mod) {
-    return mod->getOrInsertFunction(
-        GCWB_MARK,
-        Type::getVoidTy(ctx),
-        Type::getInt8PtrTy(ctx)->getPointerTo(),
-        Type::getInt8PtrTy(ctx)
-    );
-}
-
-FunctionCallee ROGGCLowering::barrierStoreFn(LLVMContext &ctx, Module *mod) {
-    return mod->getOrInsertFunction(
-        GCWB_STORE,
-        Type::getVoidTy(ctx),
-        Type::getInt8PtrTy(ctx)->getPointerTo(),
-        Type::getInt8PtrTy(ctx)
-    );
+        SplitBlockAndInsertIfThen(
+            CmpInst::Create(
+                Instruction::ICmp,
+                CmpInst::ICMP_NE,
+                new LoadInst(
+                    Type::getInt32Ty(ir->getContext()),
+                    ir->getModule()->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ir->getContext())),
+                    "",
+                    true,
+                    ir
+                ),
+                ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
+                "",
+                ir
+            ),
+            ir,
+            false,
+            MDBuilder(ir->getContext()).createBranchWeights({
+                1,
+                INT32_MAX >> 1,
+            })
+        )
+    )->setCallingConv(CallingConv::Cold);
 }
 
 void ROGGCLowering::replaceStore(CallInst *ir) {
-    auto *        mod   = ir->getModule();
-    auto &        ctx   = ir->getContext();
-    Value *       val   = ir->getArgOperand(0);
-    Value *       mem   = ir->getArgOperand(2);
-    Instruction * taken = nullptr;
-    Instruction * other = nullptr;
+    Value *   val   = ir->getArgOperand(0);
+    Value *   mem   = ir->getArgOperand(2);
+    Attribute attr  = ir->getFnAttr("atomic_ordering");
 
-    /* insert the write barrier check with a branch weight that represents "very unlikely" */
-    SplitBlockAndInsertIfThenElse(
-        barrierCond(ctx, mod, ir),
-        ir,
-        &taken,
-        &other,
-        makeVeryUnlikely(ctx)
-    );
-
-    /* remove the original instruction, and insert instructions for either cases */
-    ir->eraseFromParent();
-    barrierCall(barrierStoreFn(ctx, mod), { mem, val }, taken);
-    new StoreInst(val, mem, false, Align::Of<void **>(), other);
-}
-
-void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
-    auto *  mod = ir->getModule();
-    auto &  ctx = ir->getContext();
-    Value * mem = ir->getArgOperand(0);
-    Value * cmp = ir->getArgOperand(1);
-    Value * val = ir->getArgOperand(2);
+    /* insert the store instruction */
+    auto align = Align::Of<void **>();
+    auto store = new StoreInst(val, mem, false, align);
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
-    barrierCall(barrierMarkFn(ctx, mod), { mem, val }, SplitBlockAndInsertIfThen(
-        barrierCond(ctx, mod, ir),
-        ir,
-        false,
-        makeVeryUnlikely(ctx)
-    ));
+    insertGCWB(ir, mem, val);
+    ReplaceInstWithInst(ir, store);
+
+    /* check for atomic ordering */
+    if (!attr.isStringAttribute()) {
+        assert(!attr.isValid() && "Invalid atomic_ordering attribute");
+        return;
+    }
+
+    /* find the atomic ordering */
+    auto name = attr.getValueAsString();
+    auto iter = AtomicOrderingMap.find(name);
+
+    /* check & set the atomic ordering */
+    assert(iter != AtomicOrderingMap.end() && "Invalid atomic_ordering value");
+    store->setAtomic(iter->second);
+}
+
+void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
+    Value *mem = ir->getArgOperand(0);
+    Value *cmp = ir->getArgOperand(1);
+    Value *val = ir->getArgOperand(2);
 
     /* insert a new CAS instruction before the intrinsic */
     auto *cas = new AtomicCmpXchgInst(
@@ -192,25 +182,15 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
         SyncScope::System
     );
 
-    /* replace the intrinsic with a CAS instruction */
-    cas->takeName(ir);
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call barrier marker function in the new branch */
+    insertGCWB(ir, mem, val);
     ReplaceInstWithInst(ir, cas);
 }
 
 void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
-    auto *  mod = ir->getModule();
-    auto &  ctx = ir->getContext();
-    Value * mem = ir->getArgOperand(0);
-    Value * val = ir->getArgOperand(1);
-
-    /* insert the write barrier check with a branch weight that represents "very unlikely"
-     * and call barrier marker function in the new branch */
-    barrierCall(barrierMarkFn(ctx, mod), { mem, val }, SplitBlockAndInsertIfThen(
-        barrierCond(ctx, mod, ir),
-        ir,
-        false,
-        makeVeryUnlikely(ctx)
-    ));
+    Value *mem = ir->getArgOperand(0);
+    Value *val = ir->getArgOperand(1);
 
     /* insert a new swap instruction before the intrinsic */
     auto *cas = new AtomicRMWInst(
@@ -222,7 +202,8 @@ void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
         SyncScope::System
     );
 
-    /* replace the intrinsic with a swap instruction */
-    cas->takeName(ir);
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call barrier marker function in the new branch */
+    insertGCWB(ir, mem, val);
     ReplaceInstWithInst(ir, cas);
 }

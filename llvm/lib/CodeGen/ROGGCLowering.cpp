@@ -51,6 +51,12 @@ INITIALIZE_PASS_BEGIN(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false
 INITIALIZE_PASS_DEPENDENCY(GCModuleInfo)
 INITIALIZE_PASS_END(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
 
+static bool isOptionEnabled(Attribute attr) {
+    auto val = attr.getValueAsString();
+    assert(val.empty() || val == "true" || val == "false");
+    return val != "false";
+}
+
 FunctionPass *llvm::createROGGCLoweringPass() {
     return new ROGGCLowering();
 }
@@ -138,13 +144,18 @@ void ROGGCLowering::insertGCWB(CallInst *ir, Value *mem, Value *val) {
 }
 
 void ROGGCLowering::replaceStore(CallInst *ir) {
-    Value *   val   = ir->getArgOperand(0);
-    Value *   mem   = ir->getArgOperand(2);
-    Attribute attr  = ir->getFnAttr("atomic_ordering");
+    Value *   val = ir->getArgOperand(0);
+    Value *   mem = ir->getArgOperand(2);
+    Attribute vlt = ir->getFnAttr("volatile");
+    Attribute ord = ir->getFnAttr("atomic_ordering");
 
-    /* insert the store instruction */
-    auto align = Align::Of<void **>();
-    auto store = new StoreInst(val, mem, false, align);
+    /* create a store instruction */
+    auto store = new StoreInst(
+        val,
+        mem,
+        vlt.isStringAttribute() && vlt.getValueAsBool(),
+        Align::Of<void **>()
+    );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
@@ -152,24 +163,39 @@ void ROGGCLowering::replaceStore(CallInst *ir) {
     ReplaceInstWithInst(ir, store);
 
     /* check for atomic ordering */
-    if (!attr.isStringAttribute()) {
-        assert(!attr.isValid() && "Invalid atomic_ordering attribute");
-        return;
+    if (ord.isStringAttribute()) {
+        auto iter = AtomicOrderingMap.find(ord.getValueAsString());
+        assert(iter != AtomicOrderingMap.end() && "Invalid atomic_ordering value");
+        store->setAtomic(iter->second);
     }
-
-    /* find the atomic ordering */
-    auto name = attr.getValueAsString();
-    auto iter = AtomicOrderingMap.find(name);
-
-    /* check & set the atomic ordering */
-    assert(iter != AtomicOrderingMap.end() && "Invalid atomic_ordering value");
-    store->setAtomic(iter->second);
 }
 
 void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
-    Value *mem = ir->getArgOperand(0);
-    Value *cmp = ir->getArgOperand(1);
-    Value *val = ir->getArgOperand(2);
+    Value *   mem = ir->getArgOperand(0);
+    Value *   cmp = ir->getArgOperand(1);
+    Value *   val = ir->getArgOperand(2);
+    Attribute opt = ir->getFnAttr("weak");
+    Attribute ord = ir->getFnAttr("order");
+    Attribute vlt = ir->getFnAttr("volatile");
+    Attribute fao = ir->getFnAttr("failure_order");
+
+    /* default CAS ordering */
+    AtomicOrdering successOrder = AtomicOrdering::SequentiallyConsistent;
+    AtomicOrdering failureOrder = AtomicOrdering::SequentiallyConsistent;
+
+    /* use specified atomic ordering if any */
+    if (ord.isStringAttribute()) {
+        auto it = AtomicOrderingMap.find(ord.getValueAsString());
+        assert(it != AtomicOrderingMap.end() && "Invalid CAS order");
+        successOrder = it->second;
+    }
+
+    /* use specified failure ordering if any */
+    if (fao.isStringAttribute()) {
+        auto it = AtomicOrderingMap.find(fao.getValueAsString());
+        assert(it != AtomicOrderingMap.end() && "Invalid CAS failure order");
+        failureOrder = it->second;
+    }
 
     /* insert a new CAS instruction before the intrinsic */
     auto *cas = new AtomicCmpXchgInst(
@@ -177,10 +203,20 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
         cmp,
         val,
         Align::Of<void *>(),
-        AtomicOrdering::SequentiallyConsistent,
-        AtomicOrdering::SequentiallyConsistent,
+        successOrder,
+        failureOrder,
         SyncScope::System
     );
+
+    /* mark as weak CAS if any */
+    if (opt.isStringAttribute()) {
+        cas->setWeak(isOptionEnabled(opt));
+    }
+
+    /* mark as volatile CAS if any */
+    if (vlt.isStringAttribute()) {
+        cas->setVolatile(isOptionEnabled(vlt));
+    }
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
@@ -189,21 +225,36 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
 }
 
 void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
-    Value *mem = ir->getArgOperand(0);
-    Value *val = ir->getArgOperand(1);
+    Value *        mem = ir->getArgOperand(0);
+    Value *        val = ir->getArgOperand(1);
+    Attribute      opt = ir->getFnAttr("order");
+    Attribute      vlt = ir->getFnAttr("volatile");
+    AtomicOrdering ord = AtomicOrdering::SequentiallyConsistent;
+
+    /* use specified atomic ordering if any */
+    if (opt.isStringAttribute()) {
+        auto it = AtomicOrderingMap.find(opt.getValueAsString());
+        assert(it != AtomicOrderingMap.end() && "Invalid Xchg order");
+        ord = it->second;
+    }
 
     /* insert a new swap instruction before the intrinsic */
-    auto *cas = new AtomicRMWInst(
+    auto *rmw = new AtomicRMWInst(
         AtomicRMWInst::Xchg,
         mem,
         val,
         Align::Of<void *>(),
-        AtomicOrdering::SequentiallyConsistent,
+        ord,
         SyncScope::System
     );
+
+    /* mark as volatile xchg if any */
+    if (vlt.isStringAttribute()) {
+        rmw->setVolatile(isOptionEnabled(vlt));
+    }
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
     insertGCWB(ir, mem, val);
-    ReplaceInstWithInst(ir, cas);
+    ReplaceInstWithInst(ir, rmw);
 }

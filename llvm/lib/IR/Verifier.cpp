@@ -5374,6 +5374,8 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
   case Intrinsic::gcroot:
   case Intrinsic::gcwrite:
   case Intrinsic::gcread:
+  case Intrinsic::gcatomic_cas:
+  case Intrinsic::gcatomic_swap:
     if (ID == Intrinsic::gcroot) {
       AllocaInst *AI =
           dyn_cast<AllocaInst>(Call.getArgOperand(0)->stripPointerCasts());

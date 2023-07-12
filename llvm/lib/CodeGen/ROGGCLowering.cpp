@@ -12,8 +12,9 @@
 using namespace llvm;
 
 #define GC_NAME     "rog"
-#define VAR_NAME    "rog_gcwb_enabled"
-#define FUNC_NAME   "rog_gcwb_store_ptr"
+#define GCWB_SW     "rog_gcwb_enabled"
+#define GCWB_MARK   "rog_gcwb_mark_atomic"
+#define GCWB_STORE  "rog_gcwb_store_ptr"
 #define DEBUG_TYPE  "rog-gc-lowering"
 
 #define assert_x(x) assert(x)
@@ -27,7 +28,15 @@ public:
     bool runOnFunction(Function &fn) override;
 
 private:
-    void lowerWriteBarrier(Function &fn);
+    void           barrierCall(FunctionCallee fn, ArrayRef<Value *> args, Instruction *insertBefore);
+    Value *        barrierCond(LLVMContext &ctx, Module *mod, Instruction *insertBefore);
+    FunctionCallee barrierMarkFn(LLVMContext &ctx, Module *mod);
+    FunctionCallee barrierStoreFn(LLVMContext &ctx, Module *mod);
+
+private:
+    void replaceStore(CallInst *ir);
+    void replaceAtomicCAS(CallInst *ir);
+    void replaceAtomicSwap(CallInst *ir);
 };
 }
 
@@ -38,9 +47,8 @@ INITIALIZE_PASS_BEGIN(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false
 INITIALIZE_PASS_DEPENDENCY(GCModuleInfo)
 INITIALIZE_PASS_END(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
 
-static Function *asWriteBarrierFn(CallInst *p) {
-    auto *fn = p ? p->getCalledFunction() : nullptr;
-    return fn && fn->getIntrinsicID() == Intrinsic::gcwrite ? fn : nullptr;
+static MDNode *makeVeryUnlikely(LLVMContext &ctx) {
+    return MDBuilder(ctx).createBranchWeights({ 1, INT32_MAX >> 1 });
 }
 
 FunctionPass *llvm::createROGGCLoweringPass() {
@@ -52,85 +60,169 @@ ROGGCLowering::ROGGCLowering() : FunctionPass(ID) {
 }
 
 bool ROGGCLowering::runOnFunction(Function &fn) {
-    if (!fn.hasGC() || fn.getGC() != GC_NAME) {
+    bool isGC        = fn.hasGC() && fn.getGC() == GC_NAME;
+    bool madeChanges = false;
+
+    /* check for GC strategy */
+    if (!isGC) {
         return false;
-    } else {
-        lowerWriteBarrier(fn);
-        return true;
     }
-}
 
-void ROGGCLowering::lowerWriteBarrier(Function &fn) {
+    /* process all the instructions */
     for (auto &bb : fn) {
-        auto          it  = bb.begin();
-        Module *      mod = bb.getModule();
-        LLVMContext & ctx = bb.getContext();
+        for (auto &ins : bb) {
+            bool       ok = false;
+            CallInst * ir = dyn_cast<CallInst>(&ins);
 
-        /* scan every instruction */
-        while (it != bb.end()) {
-            CallInst *ir = dyn_cast<CallInst>(&*it++);
-            Function *wb = asWriteBarrierFn(ir);
-
-            /* must be a function call to "@llvm.gcwrite" */
-            if (wb == nullptr) {
+            /* not a function call */
+            if (ir == nullptr) {
                 continue;
             }
 
-            /* sanity check */
-            assert(wb->arg_size() == 3 && "Invalid @llvm.gcwrite call!");
-            assert(ir->arg_size() == 3 && "Invalid @llvm.gcwrite call!");
+            /* check for intrinsic ID */
+            if (auto *fp = ir->getCalledFunction()) {
+                switch (fp->getIntrinsicID()) {
+                    case Intrinsic::gcwrite       : ok = true; replaceStore(ir); break;
+                    case Intrinsic::gcatomic_cas  : ok = true; replaceAtomicCAS(ir); break;
+                    case Intrinsic::gcatomic_swap : ok = true; replaceAtomicSwap(ir); break;
+                }
+            }
 
-            /* extract the operands */
-            Value *val = ir->getArgOperand(0);
-            Value *obj = ir->getArgOperand(1);
-            Value *mem = ir->getArgOperand(2);
-
-            /* they must all be pointers */
-            assert(val->getType()->isPtrOrPtrVectorTy() && "Value is not a pointer!");
-            assert(obj->getType()->isPtrOrPtrVectorTy() && "Object is not a pointer!");
-            assert(mem->getType()->isPtrOrPtrVectorTy() && "Memory slot is not a pointer!");
-
-            /* integer types */
-            Type *i8 = Type::getInt8Ty(ctx);
-            Type *i32 = Type::getInt32Ty(ctx);
-
-            /* pointer types */
-            Type *i8p = PointerType::getUnqual(i8);
-            Type *i8pp = PointerType::getUnqual(i8p);
-
-            /* find the write barrier function and variable */
-            auto wbvar  = mod->getOrInsertGlobal(VAR_NAME, i32);
-            auto wbfunc = mod->getOrInsertFunction(FUNC_NAME, Type::getVoidTy(ctx), i8pp, i8p);
-
-            /* load and test the write barrier flags */
-            CmpInst *cond = CmpInst::Create(
-                Instruction::ICmp,
-                CmpInst::ICMP_NE,
-                new LoadInst(i32, wbvar, "", true, ir),
-                ConstantInt::get(i32, 0),
-                "",
-                ir
-            );
-
-            /* construct a branch weight that represents "very unlikely" */
-            MDBuilder     mb      = ctx;
-            Instruction * then    = nullptr;
-            Instruction * other   = nullptr;
-            MDNode *      weights = mb.createBranchWeights(ArrayRef<uint32_t>({ 1, INT32_MAX >> 1 }));
-
-            /* insert the write barrier */
-            SplitBlockAndInsertIfThenElse(cond, ir, &then, &other, weights);
-            ir->eraseFromParent();
-
-            /* create instructions for either cases */
-            auto store = new StoreInst(val, mem, false, Align::Of<void **>());
-            auto barrier = CallInst::Create(wbfunc, ArrayRef<Value *>({ mem, val }), "");
-
-            /* insert the instructions, and mark the barrier call as cold */
-            store->insertBefore(other);
-            barrier->insertBefore(then);
-            barrier->setCallingConv(CallingConv::Cold);
-            break;
+            /* the lowering will split the basic block, so there will
+             * be no instructions after this point */
+            if (ok) {
+                madeChanges = true;
+                break;
+            }
         }
     }
+
+    dbgs() << fn << "\n";
+    /* align the function to a pointer boundary */
+    fn.setAlignment(Align::Of<void *>());
+    return madeChanges;
+}
+
+void ROGGCLowering::barrierCall(FunctionCallee fn, ArrayRef<Value *> args, Instruction *insertBefore) {
+    CallInst::Create(fn, args, "", insertBefore)->setCallingConv(CallingConv::Cold);
+}
+
+Value *ROGGCLowering::barrierCond(LLVMContext &ctx, Module *mod, Instruction *insertBefore) {
+    return CmpInst::Create(
+        Instruction::ICmp,
+        CmpInst::ICMP_NE,
+        new LoadInst(
+            Type::getInt32Ty(ctx),
+            mod->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ctx)),
+            "",
+            true,
+            insertBefore
+        ),
+        ConstantInt::get(Type::getInt32Ty(ctx), 0),
+        "",
+        insertBefore
+    );
+}
+
+FunctionCallee ROGGCLowering::barrierMarkFn(LLVMContext &ctx, Module *mod) {
+    return mod->getOrInsertFunction(
+        GCWB_MARK,
+        Type::getVoidTy(ctx),
+        Type::getInt8PtrTy(ctx)->getPointerTo(),
+        Type::getInt8PtrTy(ctx)
+    );
+}
+
+FunctionCallee ROGGCLowering::barrierStoreFn(LLVMContext &ctx, Module *mod) {
+    return mod->getOrInsertFunction(
+        GCWB_STORE,
+        Type::getVoidTy(ctx),
+        Type::getInt8PtrTy(ctx)->getPointerTo(),
+        Type::getInt8PtrTy(ctx)
+    );
+}
+
+void ROGGCLowering::replaceStore(CallInst *ir) {
+    auto *        mod   = ir->getModule();
+    auto &        ctx   = ir->getContext();
+    Value *       val   = ir->getArgOperand(0);
+    Value *       mem   = ir->getArgOperand(2);
+    Instruction * taken = nullptr;
+    Instruction * other = nullptr;
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely" */
+    SplitBlockAndInsertIfThenElse(
+        barrierCond(ctx, mod, ir),
+        ir,
+        &taken,
+        &other,
+        makeVeryUnlikely(ctx)
+    );
+
+    /* remove the original instruction, and insert instructions for either cases */
+    ir->eraseFromParent();
+    barrierCall(barrierStoreFn(ctx, mod), { mem, val }, taken);
+    new StoreInst(val, mem, false, Align::Of<void **>(), other);
+}
+
+void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
+    auto *  mod = ir->getModule();
+    auto &  ctx = ir->getContext();
+    Value * mem = ir->getArgOperand(0);
+    Value * cmp = ir->getArgOperand(1);
+    Value * val = ir->getArgOperand(2);
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call barrier marker function in the new branch */
+    barrierCall(barrierMarkFn(ctx, mod), { mem, val }, SplitBlockAndInsertIfThen(
+        barrierCond(ctx, mod, ir),
+        ir,
+        false,
+        makeVeryUnlikely(ctx)
+    ));
+
+    /* insert a new CAS instruction before the intrinsic */
+    auto *cas = new AtomicCmpXchgInst(
+        mem,
+        cmp,
+        val,
+        Align::Of<void *>(),
+        AtomicOrdering::SequentiallyConsistent,
+        AtomicOrdering::SequentiallyConsistent,
+        SyncScope::System
+    );
+
+    /* replace the intrinsic with a CAS instruction */
+    cas->takeName(ir);
+    ReplaceInstWithInst(ir, cas);
+}
+
+void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
+    auto *  mod = ir->getModule();
+    auto &  ctx = ir->getContext();
+    Value * mem = ir->getArgOperand(0);
+    Value * val = ir->getArgOperand(1);
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call barrier marker function in the new branch */
+    barrierCall(barrierMarkFn(ctx, mod), { mem, val }, SplitBlockAndInsertIfThen(
+        barrierCond(ctx, mod, ir),
+        ir,
+        false,
+        makeVeryUnlikely(ctx)
+    ));
+
+    /* insert a new swap instruction before the intrinsic */
+    auto *cas = new AtomicRMWInst(
+        AtomicRMWInst::Xchg,
+        mem,
+        val,
+        Align::Of<void *>(),
+        AtomicOrdering::SequentiallyConsistent,
+        SyncScope::System
+    );
+
+    /* replace the intrinsic with a swap instruction */
+    cas->takeName(ir);
+    ReplaceInstWithInst(ir, cas);
 }

@@ -229,6 +229,34 @@ bool DoLowering(Function &F, GCStrategy &S) {
         MadeChange = true;
         break;
       }
+      case Intrinsic::gcatomic_cas: {
+        // Replace an atomic CAS barrier with a simple CAS instruction.
+        Value *Cas = new AtomicCmpXchgInst(CI->getArgOperand(0),
+                                           CI->getArgOperand(1),
+                                           CI->getArgOperand(2),
+                                           Align::Of<void *>(),
+                                           AtomicOrdering::SequentiallyConsistent,
+                                           AtomicOrdering::SequentiallyConsistent,
+                                           SyncScope::System,
+                                           CI);
+        Cas->takeName(CI);
+        CI->replaceAllUsesWith(Cas);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
+      case Intrinsic::gcatomic_swap: {
+        // Replace an atomic swap barrier with a simple swap instruction.
+        Value *Sw = new AtomicRMWInst(AtomicRMWInst::Xchg, CI->getArgOperand(0),
+                                      CI->getArgOperand(1), Align::Of<void *>(),
+                                      AtomicOrdering::SequentiallyConsistent,
+                                      SyncScope::System, CI);
+        Sw->takeName(CI);
+        CI->replaceAllUsesWith(Sw);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
       case Intrinsic::gcroot: {
         // Initialize the GC root, but do not delete the intrinsic. The
         // backend needs the intrinsic to flag the stack slot.

@@ -704,15 +704,24 @@ def int_vaend   : DefaultAttrsIntrinsic<[], [llvm_ptr_ty], [], "llvm.va_end">;
 
 //===------------------- Garbage Collection Intrinsics --------------------===//
 //
-def int_gcroot  : Intrinsic<[],
-                            [llvm_ptr_ty, llvm_ptr_ty]>;
-def int_gcread  : Intrinsic<[llvm_ptr_ty],
-                            [llvm_ptr_ty, llvm_ptr_ty],
-                            [IntrReadMem, IntrArgMemOnly]>;
-def int_gcwrite : Intrinsic<[],
-                            [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
-                            [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
-                             NoCapture<ArgIndex<2>>]>;
+def int_gcroot        : Intrinsic<[],
+                                  [llvm_ptr_ty, llvm_ptr_ty]>;
+def int_gcread        : Intrinsic<[llvm_ptr_ty],
+                                  [llvm_ptr_ty, llvm_ptr_ty],
+                                  [IntrReadMem, IntrArgMemOnly]>;
+def int_gcwrite       : Intrinsic<[],
+                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
+                                  [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
+                                   NoCapture<ArgIndex<2>>]>;
+def int_gcatomic_cas  : Intrinsic<[llvm_ptr_ty, llvm_i1_ty],
+                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
+                                  [IntrReadMem, IntrArgMemOnly,
+                                   NoCapture<ArgIndex<0>>,
+                                   NoCapture<ArgIndex<1>>]>;
+def int_gcatomic_swap : Intrinsic<[llvm_ptr_ty],
+                                  [llvm_ptr_ty, llvm_ptr_ty],
+                                  [IntrReadMem, IntrArgMemOnly,
+                                   NoCapture<ArgIndex<0>>]>;
 
 //===------------------- ObjC ARC runtime Intrinsics --------------------===//
 //

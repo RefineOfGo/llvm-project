@@ -714,16 +714,28 @@ def int_gcwrite       : Intrinsic<[],
                                   [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
                                    NoCapture<ArgIndex<2>>]>;
 def int_gcmemclr      : Intrinsic<[],
-                                  [llvm_ptr_ty, llvm_i64_ty],
-                                  [NoCapture<ArgIndex<0>>]>;
+                                  [llvm_anyptr_ty, llvm_anyint_ty, llvm_i1_ty],
+                                  [IntrWriteMem, IntrArgMemOnly, IntrWillReturn,
+                                   IntrNoFree, IntrNoCallback,
+                                   NoCapture<ArgIndex<0>>, WriteOnly<ArgIndex<0>>,
+                                   ImmArg<ArgIndex<2>>]>;
 def int_gcmemcpy      : Intrinsic<[],
-                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_i64_ty],
-                                  [NoCapture<ArgIndex<0>>,
-                                   NoCapture<ArgIndex<1>>]>;
+                                  [llvm_anyptr_ty, llvm_anyptr_ty, llvm_anyint_ty,
+                                   llvm_i1_ty],
+                                  [IntrArgMemOnly, IntrWillReturn, IntrNoFree,
+                                   IntrNoCallback,
+                                   NoCapture<ArgIndex<0>>, NoCapture<ArgIndex<1>>,
+                                   NoAlias<ArgIndex<0>>, NoAlias<ArgIndex<1>>,
+                                   WriteOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>,
+                                   ImmArg<ArgIndex<3>>]>;
 def int_gcmemmove     : Intrinsic<[],
-                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_i64_ty],
-                                  [NoCapture<ArgIndex<0>>,
-                                   NoCapture<ArgIndex<1>>]>;
+                                  [llvm_anyptr_ty, llvm_anyptr_ty, llvm_anyint_ty,
+                                   llvm_i1_ty],
+                                  [IntrArgMemOnly, IntrWillReturn, IntrNoFree,
+                                   IntrNoCallback,
+                                   NoCapture<ArgIndex<0>>, NoCapture<ArgIndex<1>>,
+                                   WriteOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>,
+                                   ImmArg<ArgIndex<3>>]>;
 def int_gcatomic_cas  : Intrinsic<[llvm_ptr_ty, llvm_i1_ty],
                                   [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
                                   [IntrReadMem, IntrArgMemOnly,

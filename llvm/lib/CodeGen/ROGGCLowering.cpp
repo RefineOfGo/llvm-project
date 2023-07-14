@@ -36,8 +36,7 @@ private:
 private:
     void replaceStore(CallInst *ir);
     void replaceMemClr(CallInst *ir);
-    void replaceMemCpy(CallInst *ir);
-    void replaceMemMove(CallInst *ir);
+    void replaceMemOps(CallInst *ir, Intrinsic::ID iid);
     void replaceAtomicCAS(CallInst *ir);
     void replaceAtomicSwap(CallInst *ir);
 };
@@ -99,8 +98,8 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
                 switch (fp->getIntrinsicID()) {
                     case Intrinsic::gcwrite       : ok = true; replaceStore(ir); break;
                     case Intrinsic::gcmemclr      : ok = true; replaceMemClr(ir); break;
-                    case Intrinsic::gcmemcpy      : ok = true; replaceMemCpy(ir); break;
-                    case Intrinsic::gcmemmove     : ok = true; replaceMemMove(ir); break;
+                    case Intrinsic::gcmemcpy      : ok = true; replaceMemOps(ir, Intrinsic::memcpy); break;
+                    case Intrinsic::gcmemmove     : ok = true; replaceMemOps(ir, Intrinsic::memmove); break;
                     case Intrinsic::gcatomic_cas  : ok = true; replaceAtomicCAS(ir); break;
                     case Intrinsic::gcatomic_swap : ok = true; replaceAtomicSwap(ir); break;
                 }
@@ -192,85 +191,34 @@ void ROGGCLowering::replaceStore(CallInst *ir) {
 }
 
 void ROGGCLowering::replaceMemClr(CallInst *ir) {
-    Value *   mem = ir->getArgOperand(0);
-    Value *   len = ir->getArgOperand(1);
-    Attribute vlt = ir->getFnAttr("volatile");
+    Value *mem = ir->getArgOperand(0);
+    Value *len = ir->getArgOperand(1);
+    Value *vlt = ir->getArgOperand(2);
+    Value *val = ConstantInt::get(Type::getInt8Ty(ir->getContext()), 0);
+    Value *nil = ConstantPointerNull::get(cast<PointerType>(mem->getType()));
 
     /* create a function call to the memset intrinsic */
     auto *fn = CallInst::Create(
-        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memset, {
-            Type::getInt8PtrTy(ir->getContext()),
-            Type::getInt64Ty(ir->getContext())
-        }),
-        {
-            mem,
-            ConstantInt::get(Type::getInt8Ty(ir->getContext()), 0),
-            len,
-            ConstantInt::getBool(
-                Type::getInt1Ty(ir->getContext()),
-                vlt.isStringAttribute() && isOptionEnabled(vlt)
-            )
-        }
+        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memset, { mem->getType(), len->getType() }),
+        { mem, val, len, vlt }
     );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */
-    insertBulkBarrier(ir, mem, ConstantPointerNull::get(cast<PointerType>(mem->getType())), len);
+    insertBulkBarrier(ir, mem, nil, len);
     ReplaceInstWithInst(ir, fn);
 }
 
-void ROGGCLowering::replaceMemCpy(CallInst *ir) {
-    Value *   mem = ir->getArgOperand(0);
-    Value *   src = ir->getArgOperand(1);
-    Value *   len = ir->getArgOperand(2);
-    Attribute vlt = ir->getFnAttr("volatile");
+void ROGGCLowering::replaceMemOps(CallInst *ir, Intrinsic::ID iid) {
+    Value *mem = ir->getArgOperand(0);
+    Value *src = ir->getArgOperand(1);
+    Value *len = ir->getArgOperand(2);
+    Value *vlt = ir->getArgOperand(3);
 
-    /* create a function call to the memcpy intrinsic */
+    /* create a function call to the mem{cpy,move} intrinsic */
     auto *fn = CallInst::Create(
-        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memcpy, {
-            Type::getInt8PtrTy(ir->getContext()),
-            Type::getInt8PtrTy(ir->getContext()),
-            Type::getInt64Ty(ir->getContext())
-        }),
-        {
-            mem,
-            src,
-            len,
-            ConstantInt::getBool(
-                Type::getInt1Ty(ir->getContext()),
-                vlt.isStringAttribute() && isOptionEnabled(vlt)
-            )
-        }
-    );
-
-    /* insert the write barrier check with a branch weight that represents "very unlikely"
-     * and call bulk barrier marker function in the new branch */
-    insertBulkBarrier(ir, mem, src, len);
-    ReplaceInstWithInst(ir, fn);
-}
-
-void ROGGCLowering::replaceMemMove(CallInst *ir) {
-    Value *   mem = ir->getArgOperand(0);
-    Value *   src = ir->getArgOperand(1);
-    Value *   len = ir->getArgOperand(2);
-    Attribute vlt = ir->getFnAttr("volatile");
-
-    /* create a function call to the memmove intrinsic */
-    auto *fn = CallInst::Create(
-        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memmove, {
-            Type::getInt8PtrTy(ir->getContext()),
-            Type::getInt8PtrTy(ir->getContext()),
-            Type::getInt64Ty(ir->getContext())
-        }),
-        {
-            mem,
-            src,
-            len,
-            ConstantInt::getBool(
-                Type::getInt1Ty(ir->getContext()),
-                vlt.isStringAttribute() && isOptionEnabled(vlt)
-            )
-        }
+        Intrinsic::getDeclaration(ir->getModule(), iid, { mem->getType(), src->getType(), len->getType() }),
+        { mem, src, len, vlt }
     );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"

@@ -2,6 +2,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
@@ -13,7 +14,8 @@ using namespace llvm;
 
 #define GC_NAME     "rog"
 #define GCWB_SW     "rog_gcwb_switch"
-#define GCWB_FN     "rog_write_barrier"
+#define GCWB_ONE    "rog_write_barrier"
+#define GCWB_BULK   "rog_bulk_write_barrier"
 #define DEBUG_TYPE  "rog-gc-lowering"
 
 #define assert_x(x) assert(x)
@@ -27,8 +29,15 @@ public:
     bool runOnFunction(Function &fn) override;
 
 private:
-    void insertGCWB(CallInst *ir, Value *mem, Value *val);
+    void invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn);
+    void insertUnitBarrier(CallInst *ir, Value *mem, Value *val);
+    void insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size);
+
+private:
     void replaceStore(CallInst *ir);
+    void replaceMemClr(CallInst *ir);
+    void replaceMemCpy(CallInst *ir);
+    void replaceMemMove(CallInst *ir);
     void replaceAtomicCAS(CallInst *ir);
     void replaceAtomicSwap(CallInst *ir);
 };
@@ -89,6 +98,9 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
             if (auto *fp = ir->getCalledFunction()) {
                 switch (fp->getIntrinsicID()) {
                     case Intrinsic::gcwrite       : ok = true; replaceStore(ir); break;
+                    case Intrinsic::gcmemclr      : ok = true; replaceMemClr(ir); break;
+                    case Intrinsic::gcmemcpy      : ok = true; replaceMemCpy(ir); break;
+                    case Intrinsic::gcmemmove     : ok = true; replaceMemMove(ir); break;
                     case Intrinsic::gcatomic_cas  : ok = true; replaceAtomicCAS(ir); break;
                     case Intrinsic::gcatomic_swap : ok = true; replaceAtomicSwap(ir); break;
                 }
@@ -108,58 +120,67 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
     return madeChanges;
 }
 
-void ROGGCLowering::insertGCWB(CallInst *ir, Value *mem, Value *val) {
-    CallInst::Create(
-        ir->getModule()->getOrInsertFunction(
-            GCWB_FN,
-            Type::getVoidTy(ir->getContext()),
-            Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
-            Type::getInt8PtrTy(ir->getContext())
-        ),
-        { mem, val },
-        "",
-        SplitBlockAndInsertIfThen(
-            CmpInst::Create(
-                Instruction::ICmp,
-                CmpInst::ICMP_NE,
-                new LoadInst(
-                    Type::getInt32Ty(ir->getContext()),
-                    ir->getModule()->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ir->getContext())),
-                    "",
-                    true,
-                    ir
-                ),
-                ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
+void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn) {
+    CallInst::Create(fn, args, "", SplitBlockAndInsertIfThen(
+        CmpInst::Create(
+            Instruction::ICmp,
+            CmpInst::ICMP_NE,
+            new LoadInst(
+                Type::getInt32Ty(ir->getContext()),
+                ir->getModule()->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ir->getContext())),
                 "",
+                true,
                 ir
             ),
-            ir,
-            false,
-            MDBuilder(ir->getContext()).createBranchWeights({
-                1,
-                INT32_MAX >> 1,
-            })
-        )
-    )->setCallingConv(CallingConv::Cold);
+            ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
+            "",
+            ir
+        ),
+        ir,
+        false,
+        MDBuilder(ir->getContext()).createBranchWeights({
+            1,
+            INT32_MAX >> 1,
+        })
+    ))->setCallingConv(CallingConv::Cold);
+}
+
+void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
+    invokeBefore(ir, { mem, val }, ir->getModule()->getOrInsertFunction(
+        GCWB_ONE,
+        Type::getVoidTy(ir->getContext()),
+        Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
+        Type::getInt8PtrTy(ir->getContext())
+    ));
+}
+
+void ROGGCLowering::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
+    invokeBefore(ir, { dest, src, size }, ir->getModule()->getOrInsertFunction(
+        GCWB_BULK,
+        Type::getVoidTy(ir->getContext()),
+        Type::getInt8PtrTy(ir->getContext()),
+        Type::getInt8PtrTy(ir->getContext()),
+        Type::getInt64Ty(ir->getContext())
+    ));
 }
 
 void ROGGCLowering::replaceStore(CallInst *ir) {
     Value *   val = ir->getArgOperand(0);
     Value *   mem = ir->getArgOperand(2);
+    Attribute ord = ir->getFnAttr("order");
     Attribute vlt = ir->getFnAttr("volatile");
-    Attribute ord = ir->getFnAttr("atomic_ordering");
 
     /* create a store instruction */
     auto store = new StoreInst(
         val,
         mem,
-        vlt.isStringAttribute() && vlt.getValueAsBool(),
+        vlt.isStringAttribute() && isOptionEnabled(vlt),
         Align::Of<void **>()
     );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
-    insertGCWB(ir, mem, val);
+    insertUnitBarrier(ir, mem, val);
     ReplaceInstWithInst(ir, store);
 
     /* check for atomic ordering */
@@ -168,6 +189,106 @@ void ROGGCLowering::replaceStore(CallInst *ir) {
         assert(iter != AtomicOrderingMap.end() && "Invalid atomic_ordering value");
         store->setAtomic(iter->second);
     }
+}
+
+void ROGGCLowering::replaceMemClr(CallInst *ir) {
+    Value *   mem = ir->getArgOperand(0);
+    Value *   len = ir->getArgOperand(1);
+    Attribute vlt = ir->getFnAttr("volatile");
+
+    /* create a function call to the memset intrinsic */
+    auto *fn = CallInst::Create(
+        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memset, {
+            Type::getInt8PtrTy(ir->getContext()),
+            Type::getInt64Ty(ir->getContext())
+        }),
+        {
+            mem,
+            ConstantInt::get(Type::getInt8Ty(ir->getContext()), 0),
+            len,
+            ConstantInt::getBool(
+                Type::getInt1Ty(ir->getContext()),
+                vlt.isStringAttribute() && isOptionEnabled(vlt)
+            )
+        }
+    );
+
+    /* must align to pointer boundary */
+    auto align = Align::Of<void *>();
+    cast<MemSetInst>(fn)->setDestAlignment(align);
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call bulk barrier marker function in the new branch */
+    insertBulkBarrier(ir, mem, ConstantPointerNull::get(cast<PointerType>(mem->getType())), len);
+    ReplaceInstWithInst(ir, fn);
+}
+
+void ROGGCLowering::replaceMemCpy(CallInst *ir) {
+    Value *   mem = ir->getArgOperand(0);
+    Value *   src = ir->getArgOperand(1);
+    Value *   len = ir->getArgOperand(2);
+    Attribute vlt = ir->getFnAttr("volatile");
+
+    /* create a function call to the memcpy intrinsic */
+    auto *fn = CallInst::Create(
+        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memcpy, {
+            Type::getInt8PtrTy(ir->getContext()),
+            Type::getInt8PtrTy(ir->getContext()),
+            Type::getInt64Ty(ir->getContext())
+        }),
+        {
+            mem,
+            src,
+            len,
+            ConstantInt::getBool(
+                Type::getInt1Ty(ir->getContext()),
+                vlt.isStringAttribute() && isOptionEnabled(vlt)
+            )
+        }
+    );
+
+    /* must align to pointer boundary */
+    cast<MemCpyInst>(fn)->setDestAlignment(Align::Of<void *>());
+    cast<MemCpyInst>(fn)->setSourceAlignment(Align::Of<void *>());
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call bulk barrier marker function in the new branch */
+    insertBulkBarrier(ir, mem, src, len);
+    ReplaceInstWithInst(ir, fn);
+}
+
+void ROGGCLowering::replaceMemMove(CallInst *ir) {
+    Value *   mem = ir->getArgOperand(0);
+    Value *   src = ir->getArgOperand(1);
+    Value *   len = ir->getArgOperand(2);
+    Attribute vlt = ir->getFnAttr("volatile");
+
+    /* create a function call to the memmove intrinsic */
+    auto *fn = CallInst::Create(
+        Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memmove, {
+            Type::getInt8PtrTy(ir->getContext()),
+            Type::getInt8PtrTy(ir->getContext()),
+            Type::getInt64Ty(ir->getContext())
+        }),
+        {
+            mem,
+            src,
+            len,
+            ConstantInt::getBool(
+                Type::getInt1Ty(ir->getContext()),
+                vlt.isStringAttribute() && isOptionEnabled(vlt)
+            )
+        }
+    );
+
+    /* must align to pointer boundary */
+    cast<MemMoveInst>(fn)->setDestAlignment(Align::Of<void *>());
+    cast<MemMoveInst>(fn)->setSourceAlignment(Align::Of<void *>());
+
+    /* insert the write barrier check with a branch weight that represents "very unlikely"
+     * and call bulk barrier marker function in the new branch */
+    insertBulkBarrier(ir, mem, src, len);
+    ReplaceInstWithInst(ir, fn);
 }
 
 void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
@@ -220,7 +341,7 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
-    insertGCWB(ir, mem, val);
+    insertUnitBarrier(ir, mem, val);
     ReplaceInstWithInst(ir, cas);
 }
 
@@ -255,6 +376,6 @@ void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call barrier marker function in the new branch */
-    insertGCWB(ir, mem, val);
+    insertUnitBarrier(ir, mem, val);
     ReplaceInstWithInst(ir, rmw);
 }

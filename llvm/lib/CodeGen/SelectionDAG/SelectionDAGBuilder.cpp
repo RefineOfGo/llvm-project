@@ -7061,6 +7061,9 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   }
   case Intrinsic::gcread:
   case Intrinsic::gcwrite:
+  case Intrinsic::gcmemclr:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
   case Intrinsic::gcatomic_cas:
   case Intrinsic::gcatomic_swap:
     llvm_unreachable("GC failed to lower gcread/gcwrite intrinsics!");

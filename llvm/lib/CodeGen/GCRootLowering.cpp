@@ -21,6 +21,7 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCContext.h"
@@ -209,8 +210,25 @@ bool DoLowering(Function &F, GCStrategy &S) {
         continue;
 
       Function *F = CI->getCalledFunction();
-      switch (F->getIntrinsicID()) {
+      Intrinsic::ID IID = F->getIntrinsicID();
+      switch (IID) {
       default: break;
+      case Intrinsic::gcroot: {
+        // Initialize the GC root, but do not delete the intrinsic. The
+        // backend needs the intrinsic to flag the stack slot.
+        Roots.push_back(
+            cast<AllocaInst>(CI->getArgOperand(0)->stripPointerCasts()));
+        break;
+      }
+      case Intrinsic::gcread: {
+        // Replace a read barrier with a simple load.
+        Value *Ld = new LoadInst(CI->getType(), CI->getArgOperand(1), "", CI);
+        Ld->takeName(CI);
+        CI->replaceAllUsesWith(Ld);
+        CI->eraseFromParent();
+        MadeChange = true;
+        break;
+      }
       case Intrinsic::gcwrite: {
         // Replace a write barrier with a simple store.
         Value *St = new StoreInst(CI->getArgOperand(0),
@@ -220,11 +238,37 @@ bool DoLowering(Function &F, GCStrategy &S) {
         MadeChange = true;
         break;
       }
-      case Intrinsic::gcread: {
-        // Replace a read barrier with a simple load.
-        Value *Ld = new LoadInst(CI->getType(), CI->getArgOperand(1), "", CI);
-        Ld->takeName(CI);
-        CI->replaceAllUsesWith(Ld);
+      case Intrinsic::gcmemclr:
+      case Intrinsic::gcmemcpy:
+      case Intrinsic::gcmemmove: {
+        // Replace a memory {clear,copy,move} barrier with a call to the intrinsic mem{set,cpy,move}.
+        Value *Fn;
+        Value *Src;
+        Value *Size;
+        Value *Dest = CI->getArgOperand(0);
+        Align MemAlign = Align::Of<void *>();
+        IRBuilder<> IR(CI);
+        if (IID != Intrinsic::gcmemclr) {
+          Src = CI->getArgOperand(1);
+          Size = CI->getArgOperand(2);
+        } else {
+          Src = ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0);
+          Size = CI->getArgOperand(1);
+        }
+        switch (IID) {
+        case Intrinsic::gcmemclr:
+          Fn = IR.CreateMemSet(Dest, Src, Size, MemAlign);
+          break;
+        case Intrinsic::gcmemcpy:
+          Fn = IR.CreateMemCpy(Dest, MemAlign, Src, MemAlign, Size);
+          break;
+        case Intrinsic::gcmemmove:
+          Fn = IR.CreateMemMove(Dest, MemAlign, Src, MemAlign, Size);
+          break;
+        default:
+          llvm_unreachable("Impossible intrinsic ID");
+        }
+        CI->replaceAllUsesWith(Fn);
         CI->eraseFromParent();
         MadeChange = true;
         break;
@@ -255,13 +299,6 @@ bool DoLowering(Function &F, GCStrategy &S) {
         CI->replaceAllUsesWith(Sw);
         CI->eraseFromParent();
         MadeChange = true;
-        break;
-      }
-      case Intrinsic::gcroot: {
-        // Initialize the GC root, but do not delete the intrinsic. The
-        // backend needs the intrinsic to flag the stack slot.
-        Roots.push_back(
-            cast<AllocaInst>(CI->getArgOperand(0)->stripPointerCasts()));
         break;
       }
       }

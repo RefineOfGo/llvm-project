@@ -713,6 +713,17 @@ def int_gcwrite       : Intrinsic<[],
                                   [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
                                   [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
                                    NoCapture<ArgIndex<2>>]>;
+def int_gcmemclr      : Intrinsic<[],
+                                  [llvm_ptr_ty, llvm_i64_ty],
+                                  [NoCapture<ArgIndex<0>>]>;
+def int_gcmemcpy      : Intrinsic<[],
+                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_i64_ty],
+                                  [NoCapture<ArgIndex<0>>,
+                                   NoCapture<ArgIndex<1>>]>;
+def int_gcmemmove     : Intrinsic<[],
+                                  [llvm_ptr_ty, llvm_ptr_ty, llvm_i64_ty],
+                                  [NoCapture<ArgIndex<0>>,
+                                   NoCapture<ArgIndex<1>>]>;
 def int_gcatomic_cas  : Intrinsic<[llvm_ptr_ty, llvm_i1_ty],
                                   [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
                                   [IntrReadMem, IntrArgMemOnly,

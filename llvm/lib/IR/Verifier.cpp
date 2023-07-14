@@ -5372,8 +5372,11 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     break;
   }
   case Intrinsic::gcroot:
-  case Intrinsic::gcwrite:
   case Intrinsic::gcread:
+  case Intrinsic::gcwrite:
+  case Intrinsic::gcmemclr:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
   case Intrinsic::gcatomic_cas:
   case Intrinsic::gcatomic_swap:
     if (ID == Intrinsic::gcroot) {

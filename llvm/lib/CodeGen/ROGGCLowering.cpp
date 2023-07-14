@@ -213,10 +213,6 @@ void ROGGCLowering::replaceMemClr(CallInst *ir) {
         }
     );
 
-    /* must align to pointer boundary */
-    auto align = Align::Of<void *>();
-    cast<MemSetInst>(fn)->setDestAlignment(align);
-
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */
     insertBulkBarrier(ir, mem, ConstantPointerNull::get(cast<PointerType>(mem->getType())), len);
@@ -247,10 +243,6 @@ void ROGGCLowering::replaceMemCpy(CallInst *ir) {
         }
     );
 
-    /* must align to pointer boundary */
-    cast<MemCpyInst>(fn)->setDestAlignment(Align::Of<void *>());
-    cast<MemCpyInst>(fn)->setSourceAlignment(Align::Of<void *>());
-
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */
     insertBulkBarrier(ir, mem, src, len);
@@ -280,10 +272,6 @@ void ROGGCLowering::replaceMemMove(CallInst *ir) {
             )
         }
     );
-
-    /* must align to pointer boundary */
-    cast<MemMoveInst>(fn)->setDestAlignment(Align::Of<void *>());
-    cast<MemMoveInst>(fn)->setSourceAlignment(Align::Of<void *>());
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */

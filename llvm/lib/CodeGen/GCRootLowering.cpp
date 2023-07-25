@@ -276,15 +276,17 @@ bool DoLowering(Function &F, GCStrategy &S) {
       }
       case Intrinsic::gcatomic_cas: {
         // Replace an atomic CAS barrier with a simple CAS instruction.
-        Value *Cas = new AtomicCmpXchgInst(CI->getArgOperand(0),
-                                           CI->getArgOperand(1),
-                                           CI->getArgOperand(2),
-                                           Align::Of<void *>(),
-                                           AtomicOrdering::SequentiallyConsistent,
-                                           AtomicOrdering::SequentiallyConsistent,
-                                           SyncScope::System,
-                                           CI);
+        AtomicCmpXchgInst *Cas = new AtomicCmpXchgInst(CI->getArgOperand(0),
+                                                       CI->getArgOperand(1),
+                                                       CI->getArgOperand(2),
+                                                       Align::Of<void *>(),
+                                                       AtomicOrdering::SequentiallyConsistent,
+                                                       AtomicOrdering::SequentiallyConsistent,
+                                                       SyncScope::System,
+                                                       CI);
         Cas->takeName(CI);
+        Cas->setWeak(cast<ConstantInt>(CI->getArgOperand(3))->isOne());
+        Cas->setVolatile(cast<ConstantInt>(CI->getArgOperand(4))->isOne());
         CI->replaceAllUsesWith(Cas);
         CI->eraseFromParent();
         MadeChange = true;
@@ -292,11 +294,12 @@ bool DoLowering(Function &F, GCStrategy &S) {
       }
       case Intrinsic::gcatomic_swap: {
         // Replace an atomic swap barrier with a simple swap instruction.
-        Value *Sw = new AtomicRMWInst(AtomicRMWInst::Xchg, CI->getArgOperand(0),
-                                      CI->getArgOperand(1), Align::Of<void *>(),
-                                      AtomicOrdering::SequentiallyConsistent,
-                                      SyncScope::System, CI);
+        AtomicRMWInst *Sw = new AtomicRMWInst(AtomicRMWInst::Xchg, CI->getArgOperand(0),
+                                              CI->getArgOperand(1), Align::Of<void *>(),
+                                              AtomicOrdering::SequentiallyConsistent,
+                                              SyncScope::System, CI);
         Sw->takeName(CI);
+        Sw->setVolatile(cast<ConstantInt>(CI->getArgOperand(2))->isOne());
         CI->replaceAllUsesWith(Sw);
         CI->eraseFromParent();
         MadeChange = true;

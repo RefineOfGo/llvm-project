@@ -182,7 +182,7 @@ void ROGGCLowering::replaceStore(CallInst *ir) {
     /* check for atomic ordering */
     if (ord.isStringAttribute()) {
         auto iter = AtomicOrderingMap.find(ord.getValueAsString());
-        assert(iter != AtomicOrderingMap.end() && "Invalid atomic_ordering value");
+        assert(iter != AtomicOrderingMap.end() && "Invalid store order");
         store->setAtomic(iter->second);
     }
 }
@@ -228,9 +228,9 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
     Value *   mem = ir->getArgOperand(0);
     Value *   cmp = ir->getArgOperand(1);
     Value *   val = ir->getArgOperand(2);
-    Attribute opt = ir->getFnAttr("weak");
+    Value *   opt = ir->getArgOperand(3);
+    Value *   vlt = ir->getArgOperand(4);
     Attribute ord = ir->getFnAttr("order");
-    Attribute vlt = ir->getFnAttr("volatile");
     Attribute fao = ir->getFnAttr("failure_order");
 
     /* default CAS ordering */
@@ -263,13 +263,13 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
     );
 
     /* mark as weak CAS if any */
-    if (opt.isStringAttribute()) {
-        cas->setWeak(isOptionEnabled(opt));
+    if (cast<ConstantInt>(*opt).isOne()) {
+        cas->setWeak(true);
     }
 
     /* mark as volatile CAS if any */
-    if (vlt.isStringAttribute()) {
-        cas->setVolatile(isOptionEnabled(vlt));
+    if (cast<ConstantInt>(*vlt).isOne()) {
+        cas->setVolatile(true);
     }
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
@@ -281,8 +281,8 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
 void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
     Value *        mem = ir->getArgOperand(0);
     Value *        val = ir->getArgOperand(1);
+    Value *        vlt = ir->getArgOperand(2);
     Attribute      opt = ir->getFnAttr("order");
-    Attribute      vlt = ir->getFnAttr("volatile");
     AtomicOrdering ord = AtomicOrdering::SequentiallyConsistent;
 
     /* use specified atomic ordering if any */
@@ -303,8 +303,8 @@ void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
     );
 
     /* mark as volatile xchg if any */
-    if (vlt.isStringAttribute()) {
-        rmw->setVolatile(isOptionEnabled(vlt));
+    if (cast<ConstantInt>(*vlt).isOne()) {
+        rmw->setVolatile(true);
     }
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"

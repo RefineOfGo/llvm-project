@@ -6,19 +6,12 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ROGGC.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
-
-#define GC_NAME     "rog"
-#define GCWB_SW     "rog_gcwb_switch"
-#define GCWB_ONE    "rog_write_barrier"
-#define GCWB_BULK   "rog_bulk_write_barrier"
-#define DEBUG_TYPE  "rog-gc-lowering"
-
-#define assert_x(x) assert(x)
 
 namespace {
 struct ROGGCLowering : public FunctionPass {
@@ -55,9 +48,13 @@ static llvm::SmallDenseMap<StringRef, AtomicOrdering> AtomicOrderingMap = {
 char ROGGCLowering::ID = 0;
 char &llvm::ROGGCLoweringID = ROGGCLowering::ID;
 
-INITIALIZE_PASS_BEGIN(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
-INITIALIZE_PASS_DEPENDENCY(GCModuleInfo)
-INITIALIZE_PASS_END(ROGGCLowering, DEBUG_TYPE, "ROG GC Lowering", false, false)
+INITIALIZE_PASS(
+    ROGGCLowering,
+    "rog-gc-lowering",
+    "ROG GC Lowering",
+    false,  // cfg
+    false   // analysis
+)
 
 static bool isOptionEnabled(Attribute attr) {
     auto val = attr.getValueAsString();
@@ -74,7 +71,7 @@ ROGGCLowering::ROGGCLowering() : FunctionPass(ID) {
 }
 
 bool ROGGCLowering::runOnFunction(Function &fn) {
-    bool isGC        = fn.hasGC() && fn.getGC() == GC_NAME;
+    bool isGC        = fn.hasGC() && fn.getGC() == ROG_GC_NAME;
     bool madeChanges = false;
 
     /* check for GC strategy */
@@ -126,7 +123,7 @@ void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionC
             CmpInst::ICMP_NE,
             new LoadInst(
                 Type::getInt32Ty(ir->getContext()),
-                ir->getModule()->getOrInsertGlobal(GCWB_SW, Type::getInt32Ty(ir->getContext())),
+                ir->getModule()->getOrInsertGlobal(ROG_GCWB_SW, Type::getInt32Ty(ir->getContext())),
                 "",
                 true,
                 ir
@@ -146,7 +143,7 @@ void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionC
 
 void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
     invokeBefore(ir, { mem, val }, ir->getModule()->getOrInsertFunction(
-        GCWB_ONE,
+        ROG_GCWB_ONE,
         Type::getVoidTy(ir->getContext()),
         Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
         Type::getInt8PtrTy(ir->getContext())
@@ -155,7 +152,7 @@ void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
 
 void ROGGCLowering::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
     invokeBefore(ir, { dest, src, size }, ir->getModule()->getOrInsertFunction(
-        GCWB_BULK,
+        ROG_GCWB_BULK,
         Type::getVoidTy(ir->getContext()),
         Type::getInt8PtrTy(ir->getContext()),
         Type::getInt8PtrTy(ir->getContext()),

@@ -23,6 +23,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ROGGC.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCContext.h"
 
@@ -189,8 +190,8 @@ static bool InsertRootInitializers(Function &F, ArrayRef<AllocaInst *> Roots) {
 /// runOnFunction - Replace gcread/gcwrite intrinsics with loads and stores.
 /// Leave gcroot intrinsics; the code generator needs to see those.
 bool LowerIntrinsics::runOnFunction(Function &F) {
-  // Quick exit for functions that do not use GC.
-  if (!F.hasGC())
+  // Quick exit for functions that do not use GC or uses ROG GC.
+  if (!F.hasGC() || F.getGC() == ROG_GC_NAME)
     return false;
 
   GCFunctionInfo &FI = getAnalysis<GCModuleInfo>().getFunctionInfo(F);
@@ -380,8 +381,8 @@ void GCMachineCodeAnalysis::FindStackOffsets(MachineFunction &MF) {
 }
 
 bool GCMachineCodeAnalysis::runOnMachineFunction(MachineFunction &MF) {
-  // Quick exit for functions that do not use GC.
-  if (!MF.getFunction().hasGC())
+  // Quick exit for functions that do not use GC or uses ROG GC.
+  if (!MF.getFunction().hasGC() || MF.getFunction().getGC() == ROG_GC_NAME)
     return false;
 
   FI = &getAnalysis<GCModuleInfo>().getFunctionInfo(MF.getFunction());

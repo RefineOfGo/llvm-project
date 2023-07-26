@@ -2520,10 +2520,12 @@ void AArch64FrameLowering::adjustForROGPrologue(
   const TargetInstrInfo *TII = ST.getInstrInfo();
 
   if (StackSize >= kROGStackRedZoneSize) {
-    BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
-      .addReg(AArch64::SP)
-      .addImm(StackSize)
-      .addImm(0);
+    if (StackSize < 4096) {
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16).addReg(AArch64::SP).addImm(StackSize).addImm(0);
+    } else {
+      BuildMI(checkMBB, DL, TII->get(AArch64::MOVi64imm), AArch64::X16).addImm(StackSize);
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXrr), AArch64::X16).addReg(AArch64::SP).addReg(AArch64::X16);
+    }
   }
 
   switch (ST.getTargetTriple().getOS()) {
@@ -2538,7 +2540,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
 
       BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
       BuildMI(checkMBB, DL, TII->get(AArch64::ADDXri), AArch64::X17)
-        .addReg(AArch64::X17, RegState::Kill)
+        .addReg(AArch64::X17)
         .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
         .addImm(12);
 
@@ -2553,13 +2555,8 @@ void AArch64FrameLowering::adjustForROGPrologue(
      * See: https://github.com/golang/go/issues/23617 */
     case Triple::Darwin:
     case Triple::MacOSX: {
-      BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17)
-        .addImm(AArch64SysReg::TPIDRRO_EL0);
-
-      BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
-        .addReg(AArch64::X17, RegState::Kill)
-        .addImm(6);
-
+      BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17).addImm(AArch64SysReg::TPIDRRO_EL0);
+      BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17).addReg(AArch64::X17).addImm(6);
       break;
     }
   }

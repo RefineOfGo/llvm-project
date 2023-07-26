@@ -2553,7 +2553,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
         .addImm(12);
 
       BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
-        .addReg(AArch64::X17, RegState::Kill)
+        .addReg(AArch64::X17)
         .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
 
       break;
@@ -2571,7 +2571,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
 
   BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
     .addReg(StackSize < kROGStackRedZoneSize ? AArch64::SP : AArch64::X16)
-    .addReg(AArch64::X17, RegState::Kill);
+    .addReg(AArch64::X17);
 
   BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))
     .addImm(AArch64CC::LS)

@@ -74,6 +74,7 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/ROGGC.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Pass.h"
@@ -82,6 +83,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/ROGStackCheckOptions.h"
 #include <cassert>
 #include <cstdint>
 #include <memory>
@@ -969,7 +971,13 @@ bool ShrinkWrap::runOnMachineFunction(MachineFunction &MF) {
 }
 
 bool ShrinkWrap::isShrinkWrapEnabled(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
   const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+
+  // Do not enable shrink-wrapping for functions that uses ROG GC or needs ROG stack checking
+  if ((F.hasGC() && F.getGC() == ROG_GC_NAME) || F.hasFnAttribute(kROGStackCheckAttr)) {
+    return false;
+  }
 
   switch (EnableShrinkWrapOpt) {
   case cl::BOU_UNSET:
@@ -981,10 +989,10 @@ bool ShrinkWrap::isShrinkWrapEnabled(const MachineFunction &MF) {
            // of the crash. Since a crash can happen anywhere, the
            // frame must be lowered before anything else happen for the
            // sanitizers to be able to get a correct stack frame.
-           !(MF.getFunction().hasFnAttribute(Attribute::SanitizeAddress) ||
-             MF.getFunction().hasFnAttribute(Attribute::SanitizeThread) ||
-             MF.getFunction().hasFnAttribute(Attribute::SanitizeMemory) ||
-             MF.getFunction().hasFnAttribute(Attribute::SanitizeHWAddress));
+           !(F.hasFnAttribute(Attribute::SanitizeAddress) ||
+             F.hasFnAttribute(Attribute::SanitizeThread) ||
+             F.hasFnAttribute(Attribute::SanitizeMemory) ||
+             F.hasFnAttribute(Attribute::SanitizeHWAddress));
   // If EnableShrinkWrap is set, it takes precedence on whatever the
   // target sets. The rational is that we assume we want to test
   // something related to shrink-wrapping.

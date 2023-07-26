@@ -2519,6 +2519,11 @@ void AArch64FrameLowering::adjustForROGPrologue(
   const AArch64Subtarget &ST = MF.getSubtarget<AArch64Subtarget>();
   const TargetInstrInfo *TII = ST.getInstrInfo();
 
+  static_assert(
+    kROGStackRedZoneSize < 4096,
+    "Red-zone larger than 4095 bytes is not allowed"
+  );
+
   if (StackSize >= kROGStackRedZoneSize) {
     if (StackSize < 4096) {
       BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16).addReg(AArch64::SP).addImm(StackSize).addImm(0);

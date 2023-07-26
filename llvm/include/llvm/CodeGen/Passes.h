@@ -326,6 +326,9 @@ namespace llvm {
   /// the ROG GC.
   extern char &ROGGCLoweringID;
 
+  /// ROGStackCheckPreparing - Preparations for ROG Stack Check prologue.
+  ModulePass *createROGStackCheckPreparingPass();
+
   /// GCMachineCodeAnalysis - Target-independent pass to mark safe points
   /// in machine code. Must be added very late during code generation, just
   /// prior to output, and importantly after all CFG transformations (such as

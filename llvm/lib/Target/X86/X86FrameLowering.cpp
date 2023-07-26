@@ -3417,15 +3417,6 @@ void X86FrameLowering::adjustForROGPrologue(
   if (MF.getFunction().isVarArg())
     report_fatal_error("ROG Stack Growing do not support vararg functions.");
 
-  int64_t GuardLoc;
-  unsigned int GuardSeg;
-
-  switch (STI.getTargetTriple().getOS()) {
-    case Triple::Linux  : GuardLoc = -8; GuardSeg = X86::FS; break;
-    case Triple::Darwin : GuardLoc = 48; GuardSeg = X86::GS; break;
-    default             : report_fatal_error("ROG Stack Growing not supported on this platform.");
-  }
-
   if (HasNestArgument(&MF))
     report_fatal_error("ROG Stack Growing do not support nested functions.");
 
@@ -3449,9 +3440,9 @@ void X86FrameLowering::adjustForROGPrologue(
   // When the frame size is less than the red-zone we just compare the stack
   // boundary directly to the value of the stack pointer.
   DebugLoc DL;
-  unsigned int StackPtr = StackSize < kROGStackRedZone ? X86::RSP : X86::RAX;
+  unsigned int StackPtr = StackSize < kROGStackRedZoneSize ? X86::RSP : X86::RAX;
 
-  if (StackSize >= kROGStackRedZone) {
+  if (StackSize >= kROGStackRedZoneSize) {
     BuildMI(checkMBB, DL, TII.get(X86::LEA64r), StackPtr)
       .addReg(X86::RSP)
       .addImm(1)
@@ -3460,19 +3451,39 @@ void X86FrameLowering::adjustForROGPrologue(
       .addReg(0);
   }
 
-  BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
+  auto &Cmp = BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
     .addReg(StackPtr)
     .addReg(0)
     .addImm(1)
-    .addReg(0)
-    .addImm(GuardLoc)
-    .addReg(GuardSeg);
+    .addReg(0);
+
+  switch (STI.getTargetTriple().getOS()) {
+    default: {
+      report_fatal_error("ROG Stack Growing not supported on this platform.");
+    }
+
+    /* Uses FS segment and linker-specified address for stack limit */
+    case Triple::Linux: {
+      Value *Sym = MF.getFunction().getParent()->getGlobalVariable(kROGStackLimit);
+      assert(Sym && "Missing ROG stack limit symbol");
+      Cmp.addGlobalAddress(cast<GlobalValue>(Sym), 0, X86II::MO_TPOFF).addReg(X86::FS);
+      break;
+    }
+
+    /* Uses GS segment and hard-coded slot 6 for stack limit
+     * See: https://github.com/golang/go/issues/23617 */
+    case Triple::Darwin:
+    case Triple::MacOSX: {
+      Cmp.addImm(48).addReg(X86::GS);
+      break;
+    }
+  }
 
   BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
     .addMBB(allocMBB)
     .addImm(X86::COND_BE);
 
-  if (StackSize < kROGStackRedZone) {
+  if (StackSize < kROGStackRedZoneSize) {
     BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::RAX)
       .addReg(X86::RSP)
       .addImm(1)

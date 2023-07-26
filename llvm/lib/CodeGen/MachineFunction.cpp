@@ -65,6 +65,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 #include <cassert>
@@ -326,7 +327,7 @@ DenormalMode MachineFunction::getDenormalMode(const fltSemantics &FPType) const 
 
 /// Should we be emitting stack growing stuff for the function (ROG-specific)
 bool MachineFunction::shouldGrowStackROG() const {
-  return getFunction().hasFnAttribute("rog-stack-check");
+  return getFunction().hasFnAttribute(kROGStackCheckAttr);
 }
 
 /// Should we be emitting segmented stack stuff for the function

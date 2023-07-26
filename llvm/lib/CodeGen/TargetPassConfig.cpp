@@ -1057,6 +1057,7 @@ bool TargetPassConfig::addISelPasses() {
   addPass(createPreISelIntrinsicLoweringPass());
   addPass(createExpandLargeDivRemPass());
   addPass(createExpandLargeFpConvertPass());
+  addPass(createROGStackCheckPreparingPass());
   addPass(&ROGGCLoweringID);
   addPass(&GCLoweringID);
   addIRPasses();

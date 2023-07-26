@@ -2496,16 +2496,6 @@ void AArch64FrameLowering::adjustForROGPrologue(
   if (MF.getFunction().isVarArg())
     report_fatal_error("ROG Stack Growing do not support vararg functions.");
 
-  int64_t Slot;
-  int64_t SysReg;
-  const AArch64Subtarget &ST = MF.getSubtarget<AArch64Subtarget>();
-
-  switch (ST.getTargetTriple().getOS()) {
-    case Triple::Linux  : Slot = 2; SysReg = AArch64SysReg::TPIDR_EL0; break;
-    case Triple::Darwin : Slot = 6; SysReg = AArch64SysReg::TPIDRRO_EL0; break;
-    default             : report_fatal_error("ROG Stack Growing not supported on this platform.");
-  }
-
   MachineFrameInfo &MFI = MF.getFrameInfo();
   uint64_t StackSize = MFI.getStackSize();
 
@@ -2526,32 +2516,63 @@ void AArch64FrameLowering::adjustForROGPrologue(
   // When the frame size is less than the red-zone we just compare the stack
   // boundary directly to the value of the stack pointer.
   DebugLoc DL;
-  unsigned int StackPtr = StackSize >= kROGStackRedZone ? AArch64::X16 : AArch64::SP;
+  const AArch64Subtarget &ST = MF.getSubtarget<AArch64Subtarget>();
   const TargetInstrInfo *TII = ST.getInstrInfo();
 
-  if (StackSize >= kROGStackRedZone) {
-    BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), StackPtr)
+  if (StackSize >= kROGStackRedZoneSize) {
+    BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
       .addReg(AArch64::SP)
       .addImm(StackSize)
       .addImm(0);
   }
 
-  BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17)
-    .addImm(SysReg);
+  switch (ST.getTargetTriple().getOS()) {
+    default: {
+      report_fatal_error("ROG Stack Growing not supported on this platform.");
+    }
 
-  BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
-    .addReg(AArch64::X17, RegState::Kill)
-    .addImm(Slot);
+    /* Uses TLS register and linker-specified address for stack limit */
+    case Triple::Linux: {
+      Value *Sym = MF.getFunction().getParent()->getGlobalVariable(kROGStackLimit);
+      assert(Sym && "Missing ROG stack limit symbol");
+
+      BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
+      BuildMI(checkMBB, DL, TII->get(AArch64::ADDXri), AArch64::X17)
+        .addReg(AArch64::X17, RegState::Kill)
+        .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
+        .addImm(12);
+
+      BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+        .addReg(AArch64::X17, RegState::Kill)
+        .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+
+      break;
+    }
+
+    /* Uses TPIDRRO_EL0 and hard-coded slot 6 for stack limit
+     * See: https://github.com/golang/go/issues/23617 */
+    case Triple::Darwin:
+    case Triple::MacOSX: {
+      BuildMI(checkMBB, DL, TII->get(AArch64::MRS), AArch64::X17)
+        .addImm(AArch64SysReg::TPIDRRO_EL0);
+
+      BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+        .addReg(AArch64::X17, RegState::Kill)
+        .addImm(6);
+
+      break;
+    }
+  }
 
   BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
-    .addReg(StackPtr)
+    .addReg(StackSize < kROGStackRedZoneSize ? AArch64::SP : AArch64::X16)
     .addReg(AArch64::X17, RegState::Kill);
 
   BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))
     .addImm(AArch64CC::LS)
     .addMBB(allocMBB);
 
-  if (StackSize < kROGStackRedZone) {
+  if (StackSize < kROGStackRedZoneSize) {
     BuildMI(allocMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
       .addReg(AArch64::SP)
       .addImm(StackSize)

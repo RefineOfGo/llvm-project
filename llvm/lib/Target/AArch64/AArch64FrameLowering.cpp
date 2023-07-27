@@ -2569,9 +2569,18 @@ void AArch64FrameLowering::adjustForROGPrologue(
     }
   }
 
-  BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
-    .addReg(StackSize < kROGStackRedZoneSize ? AArch64::SP : AArch64::X16)
-    .addReg(AArch64::X17);
+  /* Use explicit extended register form of SUBS when comparing SP with X17 to
+   * prevent LLVM from treating SP as XZR and generates wrong code. */
+  if (StackSize >= kROGStackRedZoneSize) {
+    BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrr), AArch64::XZR)
+      .addReg(AArch64::X16)
+      .addReg(AArch64::X17);
+  } else {
+    BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrx64), AArch64::XZR)
+      .addReg(AArch64::SP)
+      .addReg(AArch64::X17)
+      .addImm(0);
+  }
 
   BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))
     .addImm(AArch64CC::LS)

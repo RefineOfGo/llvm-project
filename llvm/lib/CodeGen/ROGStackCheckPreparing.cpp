@@ -72,7 +72,7 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
             mod,
             i64,
             false,
-            GlobalValue::ExternalLinkage,
+            GlobalValue::LinkOnceODRLinkage,
             ConstantInt::get(i64, 0),
             kROGStackLimit,
             nullptr,
@@ -82,7 +82,7 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
 
     /* verify the stack limit variable type */
     assert(var->getValueType() == i64 && "Invalid type for ROG stack limit");
-    assert(var->getLinkage() == GlobalValue::ExternalLinkage && "ROG stack limit must be externaly visible");
+    assert(var->getLinkage() == GlobalValue::LinkOnceODRLinkage && "ROG stack limit must be linkonce_odr");
     assert(var->getThreadLocalMode() == GlobalValue::LocalExecTLSModel && "ROG stack limit must be thread_local(localexec)");
     return ret;
 }

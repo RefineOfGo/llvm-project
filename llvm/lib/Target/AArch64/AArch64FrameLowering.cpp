@@ -2543,19 +2543,54 @@ void AArch64FrameLowering::adjustForROGPrologue(
 
     /* Uses TLS register and linker-specified address for stack limit */
     case Triple::Linux: {
+      int Size = MF.getTarget().Options.TLSSize;
       Value *Sym = MF.getFunction().getParent()->getGlobalVariable(kROGStackLimit);
       assert(Sym && "Missing ROG stack limit symbol");
 
-      BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
-      BuildMI(checkMBB, DL, TII->get(AArch64::ADDXri), AArch64::X17)
-        .addReg(AArch64::X17)
-        .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
-        .addImm(12);
+      /* default to 24-bit TLS */
+      if (Size == 0) {
+        Size = 24;
+      }
 
-      BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
-        .addReg(AArch64::X17)
-        .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+      switch (Size) {
+        default: {
+          llvm_unreachable("Unexpected TLS size");
+        }
 
+        // MRS  x17, TPIDR_EL0
+        // LDR  x17, [x17, :tprel_lo12:<var>]
+        case 12: {
+          BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
+          BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+            .addReg(AArch64::X17)
+            .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF);
+
+          break;
+        }
+
+        // MRS  x17, TPIDR_EL0
+        // ADD  x17, x17, :tprel_hi12:<var>
+        // LDR  x17, [x17, :tprel_lo12_nc:<var>]
+        case 24: {
+          BuildMI(checkMBB, DL, TII->get(AArch64::MOVbaseTLS), AArch64::X17);
+          BuildMI(checkMBB, DL, TII->get(AArch64::ADDXri), AArch64::X17)
+            .addReg(AArch64::X17)
+            .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
+            .addImm(12);
+
+          BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
+            .addReg(AArch64::X17)
+            .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+
+          break;
+        }
+
+        /* ROG does not support larger TLS size */
+        case 32:
+        case 48: {
+          llvm_unreachable("Unsupported TLS size");
+        }
+      }
       break;
     }
 

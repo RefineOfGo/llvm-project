@@ -2594,7 +2594,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
       break;
     }
 
-    /* Uses TPIDRRO_EL0 and hard-coded slot 6 for stack limit
+    /* Uses TPIDRRO_EL0 and hard-coded slot 6 for stack limit.
      * See: https://github.com/golang/go/issues/23617 */
     case Triple::Darwin:
     case Triple::MacOSX: {

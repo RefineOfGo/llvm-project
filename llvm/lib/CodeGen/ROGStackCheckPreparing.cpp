@@ -41,7 +41,13 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     bool             ok  = false;
     bool             ret = false;
     Type *           i64 = Type::getInt64Ty(mod.getContext());
+    Triple           out = Triple(mod.getTargetTriple());
     GlobalVariable * var;
+
+    /* only insert stack limit global for AArch64 Linux */
+    if (out.getOS() != Triple::Linux || out.getArch() != Triple::aarch64) {
+        return false;
+    }
 
     /* check if any function needs stack checking */
     for (auto &fn : mod.functions()) {
@@ -54,15 +60,6 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     /* none, just don't insert the stack limit global */
     if (!ok) {
         return false;
-    }
-
-    /* only insert stack limit global for Linux,
-     * macOS uses hard-coded slot index for stack limit */
-    switch (Triple(mod.getTargetTriple()).getOS()) {
-        case Triple::Linux  : break;
-        case Triple::Darwin : return false;
-        case Triple::MacOSX : return false;
-        default             : report_fatal_error("ROG Stack Growing not supported on this platform.");
     }
 
     /* create one if not exists */

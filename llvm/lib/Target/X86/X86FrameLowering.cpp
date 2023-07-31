@@ -3451,33 +3451,42 @@ void X86FrameLowering::adjustForROGPrologue(
       .addReg(0);
   }
 
-  auto &Cmp = BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
-    .addReg(StackPtr)
-    .addReg(0)
-    .addImm(1)
-    .addReg(0);
+  int64_t Offset;
+  unsigned SegReg;
 
   switch (STI.getTargetTriple().getOS()) {
     default: {
       report_fatal_error("ROG Stack Growing not supported on this platform.");
     }
 
-    /* Uses FS segment and linker-specified address for stack limit */
+    /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
+     * one of the reserved slot within `tcbhead_t` for stack limit.
+     * Also, there is a `_Static_assert` to ensure the offset was right,
+     * so we are safe here.
+     * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
     case Triple::Linux: {
-      Value *Sym = MF.getFunction().getParent()->getGlobalVariable(kROGStackLimit);
-      assert(Sym && "Missing ROG stack limit symbol");
-      Cmp.addGlobalAddress(cast<GlobalValue>(Sym), 0, X86II::MO_TPOFF).addReg(X86::FS);
+      Offset = 0x80;
+      SegReg = X86::FS;
       break;
     }
 
-    /* Uses GS segment and hard-coded slot 6 for stack limit
+    /* Uses %gs segment and hard-coded slot 6 for stack limit.
      * See: https://github.com/golang/go/issues/23617 */
     case Triple::Darwin:
     case Triple::MacOSX: {
-      Cmp.addImm(48).addReg(X86::GS);
+      Offset = 0x30;
+      SegReg = X86::GS;
       break;
     }
   }
+
+  BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
+    .addReg(StackPtr)
+    .addReg(0)
+    .addImm(1)
+    .addReg(0)
+    .addImm(Offset)
+    .addReg(SegReg);
 
   BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
     .addMBB(allocMBB)

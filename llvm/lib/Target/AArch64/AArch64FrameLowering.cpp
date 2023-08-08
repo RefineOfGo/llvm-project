@@ -2614,7 +2614,7 @@ void AArch64FrameLowering::adjustForROGPrologue(
     BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrx64), AArch64::XZR)
       .addReg(AArch64::SP)
       .addReg(AArch64::X17)
-      .addImm(0);
+      .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
   }
 
   BuildMI(checkMBB, DL, TII->get(AArch64::Bcc))

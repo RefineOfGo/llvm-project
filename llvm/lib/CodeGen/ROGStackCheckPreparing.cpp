@@ -6,6 +6,7 @@
 #include "llvm/Target/ROGStackCheckOptions.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "ROGFunctionUtils.h"
 
 using namespace llvm;
 
@@ -39,15 +40,9 @@ ROGStackCheckPreparing::ROGStackCheckPreparing() : ModulePass(ID) {
 
 bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     bool             ok  = false;
-    bool             ret = false;
     Type *           i64 = Type::getInt64Ty(mod.getContext());
     Triple           out = Triple(mod.getTargetTriple());
     GlobalVariable * var;
-
-    /* only insert stack limit global for AArch64 Linux */
-    if (out.getOS() != Triple::Linux || out.getArch() != Triple::aarch64) {
-        return false;
-    }
 
     /* check if any function needs stack checking */
     for (auto &fn : mod.functions()) {
@@ -57,14 +52,25 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
         }
     }
 
-    /* none, just don't insert the stack limit global */
+    /* none, just don't insert anything */
     if (!ok) {
         return false;
     }
 
+    /* insert a weak symbol for stack check function */
+    rog::getOrInsertFunction(
+        &mod,
+        kROGMoreStackFn,
+        Type::getVoidTy(mod.getContext())
+    );
+
+    /* only insert stack limit global for AArch64 Linux */
+    if (out.getOS() != Triple::Linux || out.getArch() != Triple::aarch64) {
+        return true;
+    }
+
     /* create one if not exists */
     if (!(var = mod.getNamedGlobal(kROGStackLimit))) {
-        ret = true;
         var = new GlobalVariable(
             mod,
             i64,
@@ -81,5 +87,5 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     assert(var->getValueType() == i64 && "Invalid type for ROG stack limit");
     assert(var->getLinkage() == GlobalValue::LinkOnceODRLinkage && "ROG stack limit must be linkonce_odr");
     assert(var->getThreadLocalMode() == GlobalValue::LocalExecTLSModel && "ROG stack limit must be thread_local(localexec)");
-    return ret;
+    return true;
 }

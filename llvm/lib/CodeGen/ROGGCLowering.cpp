@@ -10,6 +10,7 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "ROGFunctionUtils.h"
 
 using namespace llvm;
 
@@ -111,9 +112,14 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
         }
     }
 
-    /* align the function to a pointer boundary */
-    fn.setAlignment(Align::Of<void *>());
-    return madeChanges;
+    /* already aligned */
+    if (fn.getAlign().valueOrOne().value() >= 16) {
+        return madeChanges;
+    }
+
+    /* align the function to a 16-byte boundary */
+    fn.setAlignment(Align::Constant<16>());
+    return true;
 }
 
 void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn) {
@@ -123,7 +129,16 @@ void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionC
             CmpInst::ICMP_NE,
             new LoadInst(
                 Type::getInt32Ty(ir->getContext()),
-                ir->getModule()->getOrInsertGlobal(ROG_GCWB_SW, Type::getInt32Ty(ir->getContext())),
+                ir->getModule()->getOrInsertGlobal(ROG_GCWB_SW, Type::getInt32Ty(ir->getContext()), [&] {
+                    return new GlobalVariable(
+                        *ir->getModule(),
+                        Type::getInt32Ty(ir->getContext()),
+                        false,
+                        GlobalVariable::LinkOnceODRLinkage,
+                        ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
+                        ROG_GCWB_SW
+                    );
+                }),
                 "",
                 true,
                 ir
@@ -142,7 +157,8 @@ void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionC
 }
 
 void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
-    invokeBefore(ir, { mem, val }, ir->getModule()->getOrInsertFunction(
+    invokeBefore(ir, { mem, val }, rog::getOrInsertFunction(
+        ir->getModule(),
         ROG_GCWB_ONE,
         Type::getVoidTy(ir->getContext()),
         Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
@@ -151,7 +167,8 @@ void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
 }
 
 void ROGGCLowering::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
-    invokeBefore(ir, { dest, src, size }, ir->getModule()->getOrInsertFunction(
+    invokeBefore(ir, { dest, src, size }, rog::getOrInsertFunction(
+        ir->getModule(),
         ROG_GCWB_BULK,
         Type::getVoidTy(ir->getContext()),
         Type::getInt8PtrTy(ir->getContext()),

@@ -2635,6 +2635,9 @@ void AArch64FrameLowering::adjustForROGPrologue(
   BuildMI(allocMBB, DL, TII->get(AArch64::BL))
     .addExternalSymbol(kROGMoreStackFn);
 
+  BuildMI(allocMBB, DL, TII->get(AArch64::B))
+    .addMBB(&PrologueMBB);
+
   checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
   checkMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
   allocMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());

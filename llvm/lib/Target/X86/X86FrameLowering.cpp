@@ -3504,6 +3504,9 @@ void X86FrameLowering::adjustForROGPrologue(
   BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
     .addExternalSymbol(kROGMoreStackFn);
 
+  BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
+    .addMBB(&PrologueMBB);
+
   checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
   checkMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
   allocMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());

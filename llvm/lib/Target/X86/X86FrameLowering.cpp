@@ -3502,6 +3502,7 @@ void X86FrameLowering::adjustForROGPrologue(
   }
 
   BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+    .addReg(X86::RAX, RegState::Implicit)
     .addExternalSymbol(kROGMoreStackFn);
 
   BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
@@ -3944,9 +3945,11 @@ bool X86FrameLowering::enableShrinkWrapping(const MachineFunction &MF) const {
          // The lowering of segmented stack and HiPE only support entry
          // blocks as prologue blocks: PR26107. This limitation may be
          // lifted if we fix:
+         // - adjustForROGPrologue
          // - adjustForSegmentedStacks
          // - adjustForHiPEPrologue
          MF.getFunction().getCallingConv() != CallingConv::HiPE &&
+         !MF.shouldGrowStackROG() &&
          !MF.shouldSplitStack();
 }
 

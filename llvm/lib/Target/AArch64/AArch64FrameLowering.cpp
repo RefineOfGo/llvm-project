@@ -2633,6 +2633,8 @@ void AArch64FrameLowering::adjustForROGPrologue(
     .addReg(AArch64::LR);
 
   BuildMI(allocMBB, DL, TII->get(AArch64::BL))
+    .addReg(AArch64::X16, RegState::Implicit)
+    .addReg(AArch64::X17, RegState::Implicit)
     .addExternalSymbol(kROGMoreStackFn);
 
   BuildMI(allocMBB, DL, TII->get(AArch64::B))

@@ -266,8 +266,15 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   if (CC == CallingConv::GHC)
     // This is academic because all GHC calls are (supposed to be) tail calls
     return SCS ? CSR_AArch64_NoRegs_SCS_RegMask : CSR_AArch64_NoRegs_RegMask;
-  if (CC == CallingConv::Cold || CC == CallingConv::AnyReg)
+  if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
+
+  // CallingConv::Cold does not support stack shadowing.
+  if (CC == CallingConv::Cold) {
+    if (SCS)
+      report_fatal_error("ShadowCallStack attribute not available for coldcc.");
+    return CSR_AArch64_Cold_RegMask;
+  }
 
   // All the following calling conventions are handled differently on Darwin.
   if (MF.getSubtarget<AArch64Subtarget>().isTargetDarwin()) {

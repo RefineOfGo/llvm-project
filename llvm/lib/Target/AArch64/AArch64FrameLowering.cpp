@@ -2526,13 +2526,28 @@ void AArch64FrameLowering::adjustForROGPrologue(
 
   if (StackSize >= kROGStackRedZoneSize) {
     if (StackSize <= 0xfff) {
-      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16).addReg(AArch64::SP).addImm(StackSize).addImm(0);
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+        .addReg(AArch64::SP)
+        .addImm(StackSize)
+        .addImm(0);
     } else if (StackSize <= 0xffffff) {
-      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16).addReg(AArch64::SP).addImm(StackSize >> 12).addImm(12);
-      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16).addReg(AArch64::X16).addImm(StackSize & 0xfff).addImm(0);
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+        .addReg(AArch64::SP)
+        .addImm(StackSize >> 12)
+        .addImm(12);
+
+      if (StackSize & 0xfff) {
+        BuildMI(checkMBB, DL, TII->get(AArch64::SUBXri), AArch64::X16)
+          .addReg(AArch64::X16)
+          .addImm(StackSize & 0xfff)
+          .addImm(0);
+      }
     } else {
       BuildMI(checkMBB, DL, TII->get(AArch64::MOVi64imm), AArch64::X16).addImm(StackSize);
-      BuildMI(checkMBB, DL, TII->get(AArch64::SUBXrr), AArch64::X16).addReg(AArch64::SP).addReg(AArch64::X16);
+      BuildMI(checkMBB, DL, TII->get(AArch64::SUBSXrx64), AArch64::X16)
+        .addReg(AArch64::SP)
+        .addReg(AArch64::X16)
+        .addImm(AArch64_AM::getArithExtendImm(AArch64_AM::UXTX, 0));
     }
   }
 
@@ -2564,7 +2579,6 @@ void AArch64FrameLowering::adjustForROGPrologue(
           BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
             .addReg(AArch64::X17)
             .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF);
-
           break;
         }
 
@@ -2577,11 +2591,9 @@ void AArch64FrameLowering::adjustForROGPrologue(
             .addReg(AArch64::X17)
             .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_HI12)
             .addImm(12);
-
           BuildMI(checkMBB, DL, TII->get(AArch64::LDRXui), AArch64::X17)
             .addReg(AArch64::X17)
             .addGlobalAddress(cast<GlobalValue>(Sym), 0, AArch64II::MO_TLS | AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
-
           break;
         }
 

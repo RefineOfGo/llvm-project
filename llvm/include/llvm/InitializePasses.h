@@ -264,6 +264,7 @@ void initializeRemoveRedundantDebugValuesPass(PassRegistry&);
 void initializeRenameIndependentSubregsPass(PassRegistry&);
 void initializeReplaceWithVeclibLegacyPass(PassRegistry &);
 void initializeResetMachineFunctionPass(PassRegistry&);
+void initializeROGCheckPointInsertionPass(PassRegistry&);
 void initializeROGGCLoweringPass(PassRegistry&);
 void initializeROGStackCheckPreparingPass(PassRegistry&);
 void initializeSCEVAAWrapperPassPass(PassRegistry&);

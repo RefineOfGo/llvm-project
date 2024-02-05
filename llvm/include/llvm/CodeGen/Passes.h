@@ -318,6 +318,14 @@ namespace llvm {
   /// used by the shadow stack GC.
   extern char &ShadowStackGCLoweringID;
 
+  /// ROGCheckPointInsertion - Implemets the ROG check-point insertion mechanism
+  /// used by runtime.  Only runs on functions which opt in to the ROG runtime.
+  FunctionPass *createROGCheckPointInsertionPass();
+
+  /// ROGCheckPointInsertion - Implemets the ROG check-point insertion mechanism
+  /// used by runtime.
+  extern char &ROGCheckPointInsertionID;
+
   /// ROGGCLowering - Implements the custom lowering mechanism used by
   /// the ROG GC.  Only runs on functions which opt in to the ROG collector.
   FunctionPass *createROGGCLoweringPass();

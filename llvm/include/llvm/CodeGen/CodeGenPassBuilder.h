@@ -39,6 +39,7 @@
 #include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/CodeGen/PreISelIntrinsicLowering.h"
 #include "llvm/CodeGen/ReplaceWithVeclib.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/CodeGen/SafeStack.h"
 #include "llvm/CodeGen/SelectOptimize.h"
 #include "llvm/CodeGen/ShadowStackGCLowering.h"

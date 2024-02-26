@@ -1,6 +1,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -17,42 +18,18 @@ using namespace llvm;
 #define ROG_CHECKPOINT_ATTR     "rog-checkpoint"
 
 namespace {
-struct ROGCheckPointInsertion : public FunctionPass {
-    static char ID;
-    ROGCheckPointInsertion();
-
-public:
-    bool runOnFunction(Function &fn) override;
-    void getAnalysisUsage(AnalysisUsage &au) const override;
+struct ROGCheckPointInsertionImpl {
+    static bool run(Function &fn, LoopInfo &li);
 
 private:
-    void insertCheckPointBefore(Instruction *ir) const;
-    void insertCheckPointForLoops(LoopInfo &info) const;
+    static void insertCheckPointAt(Instruction *ir);
+    static void insertCheckPointForLoops(LoopInfo &li);
 };
 }
 
-char ROGCheckPointInsertion::ID = 0;
-char &llvm::ROGCheckPointInsertionID = ROGCheckPointInsertion::ID;
-
-INITIALIZE_PASS(
-    ROGCheckPointInsertion,
-    "rog-checkpoint-insertion",
-    "ROG Check Point Insertion",
-    false,
-    false
-)
-
-FunctionPass *llvm::createROGCheckPointInsertionPass() {
-    return new ROGCheckPointInsertion();
-}
-
-ROGCheckPointInsertion::ROGCheckPointInsertion() : FunctionPass(ID) {
-    initializeROGCheckPointInsertionPass(*PassRegistry::getPassRegistry());
-}
-
-bool ROGCheckPointInsertion::runOnFunction(Function &fn) {
-    auto *ir = &*fn.begin()->begin();
-    auto &li = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+bool ROGCheckPointInsertionImpl::run(Function &fn, LoopInfo &li) {
+    auto  it = fn.begin();
+    auto *ir = &*it->begin();
 
     /* check if this function needs check-point */
     if (!fn.hasFnAttribute(ROG_CHECKPOINT_ATTR)) {
@@ -60,16 +37,12 @@ bool ROGCheckPointInsertion::runOnFunction(Function &fn) {
     }
 
     /* insert checkpoint for this function */
-    insertCheckPointBefore(ir);
+    insertCheckPointAt(ir);
     insertCheckPointForLoops(li);
     return true;
 }
 
-void ROGCheckPointInsertion::getAnalysisUsage(AnalysisUsage &au) const {
-    au.addRequiredTransitive<LoopInfoWrapperPass>();
-}
-
-void ROGCheckPointInsertion::insertCheckPointBefore(Instruction *ir) const {
+void ROGCheckPointInsertionImpl::insertCheckPointAt(Instruction *ir) {
     CallInst::Create(
         rog::getOrInsertFunction(
             ir->getModule(),
@@ -109,11 +82,11 @@ void ROGCheckPointInsertion::insertCheckPointBefore(Instruction *ir) const {
                 INT32_MAX >> 1,
             })
         )
-    );
+    )->setCallingConv(CallingConv::Cold);
 }
 
-void ROGCheckPointInsertion::insertCheckPointForLoops(LoopInfo &info) const {
-    for (auto loop : info) {
+void ROGCheckPointInsertionImpl::insertCheckPointForLoops(LoopInfo &li) {
+    for (auto loop : li) {
         BasicBlock *                 head;
         SmallVector<BasicBlock *, 4> back;
 
@@ -124,10 +97,61 @@ void ROGCheckPointInsertion::insertCheckPointForLoops(LoopInfo &info) const {
         /* split the latch if needed */
         for (auto bb : back) {
             if (bb->getUniqueSuccessor()) {
-                insertCheckPointBefore(&*bb->rbegin());
+                insertCheckPointAt(&*bb->rbegin());
             } else {
-                insertCheckPointBefore(&*SplitEdge(bb, head)->rbegin());
+                insertCheckPointAt(&*SplitEdge(bb, head)->rbegin());
             }
         }
     }
+}
+
+/** New Pass Manager **/
+
+PreservedAnalyses ROGCheckPointInsertionPass::run(Function &fn, FunctionAnalysisManager &am) {
+    if (!ROGCheckPointInsertionImpl::run(fn, am.getResult<LoopAnalysis>(fn))) {
+        return PreservedAnalyses::all();
+    } else {
+        return PreservedAnalyses::none();
+    }
+}
+
+/** Legacy Pass Manager **/
+
+namespace {
+struct ROGCheckPointInsertion : public FunctionPass {
+    static char ID;
+    ROGCheckPointInsertion();
+
+public:
+    bool runOnFunction(Function &fn) override;
+    void getAnalysisUsage(AnalysisUsage &au) const override;
+};
+}
+
+char ROGCheckPointInsertion::ID = 0;
+char &llvm::ROGCheckPointInsertionID = ROGCheckPointInsertion::ID;
+
+INITIALIZE_PASS(
+    ROGCheckPointInsertion,
+    "rog-checkpoint-insertion",
+    "ROG Check Point Insertion",
+    false,
+    false
+)
+
+FunctionPass *llvm::createROGCheckPointInsertionPass() {
+    return new ROGCheckPointInsertion();
+}
+
+ROGCheckPointInsertion::ROGCheckPointInsertion() : FunctionPass(ID) {
+    initializeROGCheckPointInsertionPass(*PassRegistry::getPassRegistry());
+}
+
+bool ROGCheckPointInsertion::runOnFunction(Function &fn) {
+    auto &li = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    return ROGCheckPointInsertionImpl::run(fn, li);
+}
+
+void ROGCheckPointInsertion::getAnalysisUsage(AnalysisUsage &au) const {
+    au.addRequiredTransitive<LoopInfoWrapperPass>();
 }

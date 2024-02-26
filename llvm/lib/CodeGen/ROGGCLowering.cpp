@@ -1,4 +1,5 @@
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/ROGPasses.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -15,24 +16,20 @@
 using namespace llvm;
 
 namespace {
-struct ROGGCLowering : public FunctionPass {
-    static char ID;
-    ROGGCLowering();
-
-public:
-    bool runOnFunction(Function &fn) override;
+struct ROGGCLoweringImpl {
+    static bool run(Function &fn);
 
 private:
-    void invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn);
-    void insertUnitBarrier(CallInst *ir, Value *mem, Value *val);
-    void insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size);
+    static void invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn);
+    static void insertUnitBarrier(CallInst *ir, Value *mem, Value *val);
+    static void insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size);
 
 private:
-    void replaceStore(CallInst *ir);
-    void replaceMemClr(CallInst *ir);
-    void replaceMemOps(CallInst *ir, Intrinsic::ID iid);
-    void replaceAtomicCAS(CallInst *ir);
-    void replaceAtomicSwap(CallInst *ir);
+    static void replaceStore(CallInst *ir);
+    static void replaceMemClr(CallInst *ir);
+    static void replaceMemOps(CallInst *ir, Intrinsic::ID iid);
+    static void replaceAtomicCAS(CallInst *ir);
+    static void replaceAtomicSwap(CallInst *ir);
 };
 }
 
@@ -46,32 +43,13 @@ static llvm::SmallDenseMap<StringRef, AtomicOrdering> AtomicOrderingMap = {
     { "seq_cst"    , AtomicOrdering::SequentiallyConsistent },
 };
 
-char ROGGCLowering::ID = 0;
-char &llvm::ROGGCLoweringID = ROGGCLowering::ID;
-
-INITIALIZE_PASS(
-    ROGGCLowering,
-    "rog-gc-lowering",
-    "ROG GC Lowering",
-    false,  // cfg
-    false   // analysis
-)
-
 static bool isOptionEnabled(Attribute attr) {
     auto val = attr.getValueAsString();
     assert(val.empty() || val == "true" || val == "false");
     return val != "false";
 }
 
-FunctionPass *llvm::createROGGCLoweringPass() {
-    return new ROGGCLowering();
-}
-
-ROGGCLowering::ROGGCLowering() : FunctionPass(ID) {
-    initializeROGGCLoweringPass(*PassRegistry::getPassRegistry());
-}
-
-bool ROGGCLowering::runOnFunction(Function &fn) {
+bool ROGGCLoweringImpl::run(Function &fn) {
     bool isGC        = fn.hasGC() && fn.getGC() == ROG_GC_NAME;
     bool madeChanges = false;
 
@@ -122,7 +100,7 @@ bool ROGGCLowering::runOnFunction(Function &fn) {
     return true;
 }
 
-void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn) {
+void ROGGCLoweringImpl::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionCallee fn) {
     CallInst::Create(fn, args, "", SplitBlockAndInsertIfThen(
         CmpInst::Create(
             Instruction::ICmp,
@@ -156,28 +134,28 @@ void ROGGCLowering::invokeBefore(CallInst *ir, ArrayRef<Value *> args, FunctionC
     ))->setCallingConv(CallingConv::Cold);
 }
 
-void ROGGCLowering::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
+void ROGGCLoweringImpl::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
     invokeBefore(ir, { mem, val }, rog::getOrInsertFunction(
         ir->getModule(),
         ROG_GCWB_ONE,
         Type::getVoidTy(ir->getContext()),
-        Type::getInt8PtrTy(ir->getContext())->getPointerTo(),
-        Type::getInt8PtrTy(ir->getContext())
+        Type::getInt8Ty(ir->getContext())->getPointerTo()->getPointerTo(),
+        Type::getInt8Ty(ir->getContext())->getPointerTo()
     ));
 }
 
-void ROGGCLowering::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
+void ROGGCLoweringImpl::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
     invokeBefore(ir, { dest, src, size }, rog::getOrInsertFunction(
         ir->getModule(),
         ROG_GCWB_BULK,
         Type::getVoidTy(ir->getContext()),
-        Type::getInt8PtrTy(ir->getContext()),
-        Type::getInt8PtrTy(ir->getContext()),
+        Type::getInt8Ty(ir->getContext())->getPointerTo(),
+        Type::getInt8Ty(ir->getContext())->getPointerTo(),
         Type::getInt64Ty(ir->getContext())
     ));
 }
 
-void ROGGCLowering::replaceStore(CallInst *ir) {
+void ROGGCLoweringImpl::replaceStore(CallInst *ir) {
     Value *   val = ir->getArgOperand(0);
     Value *   mem = ir->getArgOperand(2);
     Attribute ord = ir->getFnAttr("order");
@@ -204,7 +182,7 @@ void ROGGCLowering::replaceStore(CallInst *ir) {
     }
 }
 
-void ROGGCLowering::replaceMemClr(CallInst *ir) {
+void ROGGCLoweringImpl::replaceMemClr(CallInst *ir) {
     Value *mem = ir->getArgOperand(0);
     Value *len = ir->getArgOperand(1);
     Value *vlt = ir->getArgOperand(2);
@@ -223,7 +201,7 @@ void ROGGCLowering::replaceMemClr(CallInst *ir) {
     ReplaceInstWithInst(ir, fn);
 }
 
-void ROGGCLowering::replaceMemOps(CallInst *ir, Intrinsic::ID iid) {
+void ROGGCLoweringImpl::replaceMemOps(CallInst *ir, Intrinsic::ID iid) {
     Value *mem = ir->getArgOperand(0);
     Value *src = ir->getArgOperand(1);
     Value *len = ir->getArgOperand(2);
@@ -241,7 +219,7 @@ void ROGGCLowering::replaceMemOps(CallInst *ir, Intrinsic::ID iid) {
     ReplaceInstWithInst(ir, fn);
 }
 
-void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
+void ROGGCLoweringImpl::replaceAtomicCAS(CallInst *ir) {
     Value *   mem = ir->getArgOperand(0);
     Value *   cmp = ir->getArgOperand(1);
     Value *   val = ir->getArgOperand(2);
@@ -295,7 +273,7 @@ void ROGGCLowering::replaceAtomicCAS(CallInst *ir) {
     ReplaceInstWithInst(ir, cas);
 }
 
-void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
+void ROGGCLoweringImpl::replaceAtomicSwap(CallInst *ir) {
     Value *        mem = ir->getArgOperand(0);
     Value *        val = ir->getArgOperand(1);
     Value *        vlt = ir->getArgOperand(2);
@@ -328,4 +306,49 @@ void ROGGCLowering::replaceAtomicSwap(CallInst *ir) {
      * and call barrier marker function in the new branch */
     insertUnitBarrier(ir, mem, val);
     ReplaceInstWithInst(ir, rmw);
+}
+
+/** New Pass Manager **/
+
+PreservedAnalyses ROGGCLoweringPass::run(Function &fn, FunctionAnalysisManager &am) {
+    if (!ROGGCLoweringImpl::run(fn)) {
+        return PreservedAnalyses::all();
+    } else {
+        return PreservedAnalyses::none();
+    }
+}
+
+/** Legacy Pass Manager **/
+
+namespace {
+struct ROGGCLowering : public FunctionPass {
+    static char ID;
+    ROGGCLowering();
+
+public:
+    bool runOnFunction(Function &fn) override;
+};
+}
+
+char ROGGCLowering::ID = 0;
+char &llvm::ROGGCLoweringID = ROGGCLowering::ID;
+
+INITIALIZE_PASS(
+    ROGGCLowering,
+    "rog-gc-lowering",
+    "ROG GC Lowering",
+    false,  // cfg
+    false   // analysis
+)
+
+FunctionPass *llvm::createROGGCLoweringPass() {
+    return new ROGGCLowering();
+}
+
+ROGGCLowering::ROGGCLowering() : FunctionPass(ID) {
+    initializeROGGCLoweringPass(*PassRegistry::getPassRegistry());
+}
+
+bool ROGGCLowering::runOnFunction(Function &fn) {
+    return ROGGCLoweringImpl::run(fn);
 }

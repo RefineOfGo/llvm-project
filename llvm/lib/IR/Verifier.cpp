@@ -2698,6 +2698,7 @@ void Verifier::visitFunction(const Function &F) {
     }
 
     [[fallthrough]];
+  case CallingConv::ROG:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::Intel_OCL_BI:

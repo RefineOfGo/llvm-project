@@ -120,12 +120,31 @@ static bool isCallingConvCCompatible(CallingConv::ID CC, StringRef TT,
   switch (CC) {
   default:
     return false;
+
   case llvm::CallingConv::C:
     return true;
+
+  case llvm::CallingConv::ROG:
+    if (FuncTy->getNumParams() >= 6)
+      return false;
+
+    if (!FuncTy->getReturnType()->isPointerTy() &&
+        !FuncTy->getReturnType()->isIntegerTy() &&
+        !FuncTy->getReturnType()->isFloatingPointTy() &&
+        !FuncTy->getReturnType()->isVoidTy())
+      return false;
+
+    for (auto *Param : FuncTy->params()) {
+      if (!Param->isPointerTy() &&
+          !Param->isIntegerTy() &&
+          !Param->isFloatingPointTy())
+        return false;
+    }
+    return true;
+
   case llvm::CallingConv::ARM_APCS:
   case llvm::CallingConv::ARM_AAPCS:
   case llvm::CallingConv::ARM_AAPCS_VFP: {
-
     // The iOS ABI diverges from the standard in some cases, so for now don't
     // try to simplify those calls.
     if (Triple(TT).isiOS())

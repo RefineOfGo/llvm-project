@@ -86,6 +86,12 @@ namespace CallingConv {
     /// their stack.
     SwiftTail = 20,
 
+    /// Calling convention used by ROG. This calling convention is identical to
+    /// the C calling convention on AArch64, and is an extension of the C calling
+    /// convention on X86_64, which uses more registers to pass arguments (8 instead
+    /// of 6) and return values (8 instead of 2).
+    ROG = 21,
+
     /// This is the start of the target-specific calling conventions, e.g.
     /// fastcall and thiscall on X86.
     FirstTargetCC = 64,

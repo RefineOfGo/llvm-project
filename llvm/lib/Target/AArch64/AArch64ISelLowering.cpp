@@ -6519,6 +6519,8 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   switch (CC) {
   default:
     report_fatal_error("Unsupported calling convention.");
+  case CallingConv::ROG:
+    return CC_AArch64_AAPCS;
   case CallingConv::GHC:
     return CC_AArch64_GHC;
   case CallingConv::C:
@@ -6572,6 +6574,8 @@ CCAssignFn *
 AArch64TargetLowering::CCAssignFnForReturn(CallingConv::ID CC) const {
   switch (CC) {
   default:
+    return RetCC_AArch64_AAPCS;
+  case CallingConv::ROG:
     return RetCC_AArch64_AAPCS;
   case CallingConv::ARM64EC_Thunk_X64:
     return RetCC_AArch64_Arm64EC_Thunk;
@@ -7206,6 +7210,7 @@ static bool canGuaranteeTCO(CallingConv::ID CC, bool GuaranteeTailCalls) {
 static bool mayTailCallThisCC(CallingConv::ID CC) {
   switch (CC) {
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::AArch64_SVE_VectorCall:
   case CallingConv::PreserveMost:
   case CallingConv::PreserveAll:

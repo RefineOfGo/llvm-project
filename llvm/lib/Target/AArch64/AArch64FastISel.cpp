@@ -335,6 +335,8 @@ static unsigned getImplicitScaleFactor(MVT VT) {
 }
 
 CCAssignFn *AArch64FastISel::CCAssignFnForCall(CallingConv::ID CC) const {
+  if (CC == CallingConv::ROG)
+    return CC_AArch64_AAPCS;
   if (CC == CallingConv::GHC)
     return CC_AArch64_GHC;
   if (CC == CallingConv::CFGuard_Check)
@@ -2903,7 +2905,9 @@ bool AArch64FastISel::fastLowerArguments() {
     return false;
 
   CallingConv::ID CC = F->getCallingConv();
-  if (CC != CallingConv::C && CC != CallingConv::Swift)
+  if (CC != CallingConv::C &&
+      CC != CallingConv::ROG &&
+      CC != CallingConv::Swift)
     return false;
 
   if (Subtarget->hasCustomCallingConv())

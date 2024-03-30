@@ -6519,11 +6519,10 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   switch (CC) {
   default:
     report_fatal_error("Unsupported calling convention.");
-  case CallingConv::ROG:
-    return CC_AArch64_AAPCS;
   case CallingConv::GHC:
     return CC_AArch64_GHC;
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::PreserveMost:
@@ -6574,8 +6573,6 @@ CCAssignFn *
 AArch64TargetLowering::CCAssignFnForReturn(CallingConv::ID CC) const {
   switch (CC) {
   default:
-    return RetCC_AArch64_AAPCS;
-  case CallingConv::ROG:
     return RetCC_AArch64_AAPCS;
   case CallingConv::ARM64EC_Thunk_X64:
     return RetCC_AArch64_Arm64EC_Thunk;

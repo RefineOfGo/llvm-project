@@ -587,11 +587,10 @@ bool AArch64RegisterInfo::isArgumentRegister(const MachineFunction &MF,
   switch (CC) {
   default:
     report_fatal_error("Unsupported calling convention.");
-  case CallingConv::ROG:
-    return HasReg(CC_AArch64_AAPCS_ArgRegs, Reg);
   case CallingConv::GHC:
     return HasReg(CC_AArch64_GHC_ArgRegs, Reg);
   case CallingConv::C:
+  case CallingConv::ROG:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::PreserveMost:

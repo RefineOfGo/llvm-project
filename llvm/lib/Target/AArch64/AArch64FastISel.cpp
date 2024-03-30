@@ -335,8 +335,6 @@ static unsigned getImplicitScaleFactor(MVT VT) {
 }
 
 CCAssignFn *AArch64FastISel::CCAssignFnForCall(CallingConv::ID CC) const {
-  if (CC == CallingConv::ROG)
-    return CC_AArch64_AAPCS;
   if (CC == CallingConv::GHC)
     return CC_AArch64_GHC;
   if (CC == CallingConv::CFGuard_Check)

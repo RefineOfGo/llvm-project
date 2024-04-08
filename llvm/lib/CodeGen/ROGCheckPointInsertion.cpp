@@ -28,16 +28,21 @@ private:
 }
 
 bool ROGCheckPointInsertionImpl::run(Function &fn, LoopInfo &li) {
-    auto  it = fn.begin();
-    auto *ir = &*it->begin();
+    auto &bb = fn.front();
+    auto  it = bb.begin();
 
     /* check if this function needs check-point */
     if (!fn.hasFnAttribute(ROG_CHECKPOINT_ATTR)) {
         return false;
     }
 
+    /* skip all the "alloca" instructions */
+    while (it != bb.end() && it->getOpcode() == Instruction::Alloca) {
+        it++;
+    }
+
     /* insert checkpoint for this function */
-    insertCheckPointAt(ir);
+    insertCheckPointAt(&*it);
     insertCheckPointForLoops(li);
     return true;
 }
@@ -97,9 +102,9 @@ void ROGCheckPointInsertionImpl::insertCheckPointForLoops(LoopInfo &li) {
         /* split the latch if needed */
         for (auto bb : back) {
             if (bb->getUniqueSuccessor()) {
-                insertCheckPointAt(&*bb->rbegin());
+                insertCheckPointAt(&bb->back());
             } else {
-                insertCheckPointAt(&*SplitEdge(bb, head)->rbegin());
+                insertCheckPointAt(&SplitEdge(bb, head)->back());
             }
         }
     }

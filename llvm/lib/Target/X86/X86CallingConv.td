@@ -274,7 +274,7 @@ def RetCC_X86Common : CallingConv<[
   CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64],
             CCAssignToReg<[XMM0,XMM1,XMM2,XMM3]>>,
 
-  // 256-bit vectors are returned in YMM0 and XMM1, when they fit. YMM2 and YMM3
+  // 256-bit vectors are returned in YMM0 and YMM1, when they fit. YMM2 and YMM3
   // can only be used by ABI non-compliant code. This vector type is only
   // supported while using the AVX target feature.
   CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v8f32, v4f64],
@@ -451,8 +451,9 @@ def RetCC_X86_64_ROG : CallingConv<[
   // Pointers are always returned in full 64-bit registers.
   CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
 
-  // Promote i1/i8/i16/v1i1 arguments to i32.
-  CCIfType<[i1, i8, i16, v1i1], CCPromoteToType<i32>>,
+  // Promote i1 arguments to i8.
+  CCIfType<[v1i1],  CCPromoteToType<i8>>,
+  CCIfType<[i1],  CCPromoteToType<i8>>,
 
   // The first 8 integer return values are passed in integer registers.
   CCIfType<[i8], CCAssignToReg<[AL, DL, CL, DIL, SIL, R8B, R9B, R10B]>>,
@@ -470,23 +471,17 @@ def RetCC_X86_64_ROG : CallingConv<[
   CCIfType<[v32i1], CCPromoteToType<v32i8>>,
   CCIfType<[v64i1], CCPromoteToType<v64i8>>,
 
-  // Vector types are returned in XMM0 and XMM1, when they fit.  XMM2 and XMM3
-  // can only be used by ABI non-compliant code. If the target doesn't have XMM
-  // registers, it won't have vector types.
+  // Vector types are returned in XMM0 to XMM7, when they fit.
   CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64],
-            CCAssignToReg<[XMM0,XMM1,XMM2,XMM3]>>,
+            CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
 
-  // 256-bit vectors are returned in YMM0 and XMM1, when they fit. YMM2 and YMM3
-  // can only be used by ABI non-compliant code. This vector type is only
-  // supported while using the AVX target feature.
+  // 256-bit vectors are returned in YMM0 to YMM7, when they fit.
   CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v8f32, v4f64],
-            CCAssignToReg<[YMM0,YMM1,YMM2,YMM3]>>,
+            CCAssignToReg<[YMM0, YMM1, YMM2, YMM3, YMM4, YMM5, YMM6, YMM7]>>,
 
-  // 512-bit vectors are returned in ZMM0 and ZMM1, when they fit. ZMM2 and ZMM3
-  // can only be used by ABI non-compliant code. This vector type is only
-  // supported while using the AVX-512 target feature.
+  // 512-bit vectors are returned in ZMM0 to ZMM7, when they fit.
   CCIfType<[v64i8, v32i16, v16i32, v8i64, v32f16, v16f32, v8f64],
-            CCAssignToReg<[ZMM0,ZMM1,ZMM2,ZMM3]>>,
+            CCAssignToReg<[ZMM0, ZMM1, ZMM2, ZMM3, ZMM4, ZMM5, ZMM6, ZMM7]>>,
 ]>;
 
 // X86-64 AnyReg return-value convention. No explicit register is specified for
@@ -807,8 +802,7 @@ def CC_X86_64_ROG : CallingConv<[
   // The first 8 integer arguments are passed in integer registers.
   CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D, R10D, R11D]>>,
 
-  // i128 can be either passed in two i64 registers, or on the stack, but
-  // not split across register and stack.
+  // i128's are always passed in two i64 registers.
   CCIfType<[i64], CCIfSplit<CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, R11]>>>,
   CCIfType<[i64], CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, R11]>>,
 

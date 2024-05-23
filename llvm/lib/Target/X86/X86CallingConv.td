@@ -442,7 +442,7 @@ def RetCC_X86_64_Swift : CallingConv<[
 ]>;
 
 def RetCC_X86_64_ROG : CallingConv<[
-  // The ROG calling convention always returns FP values in XMM0.
+  // The ROG calling convention always returns FP values in XMM0-7.
   CCIfType<[f16], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
   CCIfType<[f32], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
   CCIfType<[f64], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
@@ -800,11 +800,8 @@ def CC_X86_64_ROG : CallingConv<[
   CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
 
   // The first 8 integer arguments are passed in integer registers.
-  CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D, R10D, R11D]>>,
-
-  // i128's are always passed in two i64 registers.
-  CCIfType<[i64], CCIfSplit<CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, R11]>>>,
-  CCIfType<[i64], CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, R11]>>,
+  CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D, R10D, EAX]>>,
+  CCIfType<[i64], CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, RAX]>>,
 
   // Boolean vectors of AVX-512 are passed in SIMD registers.
   // The call from AVX to AVX-512 function should work,

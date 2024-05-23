@@ -3158,6 +3158,8 @@ void X86FrameLowering::adjustForSegmentedStacks(
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+  assert(MF.getFunction().getCallingConv() != CallingConv::ROG &&
+         "ROG calling convention does not support segmented stacks.");
 
   unsigned ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);
   assert(!MF.getRegInfo().isLiveIn(ScratchReg) &&
@@ -3440,7 +3442,7 @@ void X86FrameLowering::adjustForROGPrologue(
   // When the frame size is less than the red-zone we just compare the stack
   // boundary directly to the value of the stack pointer.
   DebugLoc DL;
-  unsigned int StackPtr = StackSize < kROGStackRedZoneSize ? X86::RSP : X86::RAX;
+  unsigned int StackPtr = StackSize < kROGStackRedZoneSize ? X86::RSP : X86::R11;
 
   if (StackSize >= kROGStackRedZoneSize) {
     BuildMI(checkMBB, DL, TII.get(X86::LEA64r), StackPtr)
@@ -3493,7 +3495,7 @@ void X86FrameLowering::adjustForROGPrologue(
     .addImm(X86::COND_BE);
 
   if (StackSize < kROGStackRedZoneSize) {
-    BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::RAX)
+    BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::R11)
       .addReg(X86::RSP)
       .addImm(1)
       .addReg(0)
@@ -3502,7 +3504,7 @@ void X86FrameLowering::adjustForROGPrologue(
   }
 
   BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
-    .addReg(X86::RAX, RegState::Implicit)
+    .addReg(X86::R11, RegState::Implicit)
     .addExternalSymbol(kROGMoreStackFn);
 
   BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
@@ -3576,6 +3578,7 @@ void X86FrameLowering::adjustForHiPEPrologue(
   // To support shrink-wrapping we would need to insert the new blocks
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+  assert(MF.getFunction().getCallingConv() == CallingConv::HiPE && "Calling convention must be HiPE");
 
   // HiPE-specific values
   NamedMDNode *HiPELiteralsMD =

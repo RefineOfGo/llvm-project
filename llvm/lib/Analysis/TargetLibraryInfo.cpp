@@ -139,7 +139,7 @@ static bool isCallingConvCCompatible(CallingConv::ID CC, StringRef TT,
   case llvm::CallingConv::ARM_AAPCS_VFP: {
     // The iOS ABI diverges from the standard in some cases, so for now don't
     // try to simplify those calls.
-    if (CC != llvm::CallingConv::ROG && Triple(TT).isiOS())
+    if (Triple(TT).isiOS())
       return false;
 
     if (!FuncTy->getReturnType()->isPointerTy() &&

@@ -5398,6 +5398,8 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
           "Enclosing function does not use GC.", Call);
     break;
   case Intrinsic::init_trampoline:
+    Check(Call.getParent()->getParent()->getCallingConv() != CallingConv::ROG,
+          "ROG calling convention does not support nesting.", Call);
     Check(isa<Function>(Call.getArgOperand(1)->stripPointerCasts()),
           "llvm.init_trampoline parameter #2 must resolve to a function.",
           Call);

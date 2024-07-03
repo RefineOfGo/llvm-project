@@ -571,6 +571,7 @@ MCSectionELF *MCContext::getELFSection(const Twine &Section, unsigned Type,
     // section flags (i.e. this is not that SHF_EXECINSTR is unset bur rather it
     // is unknown).
     Kind = llvm::StringSwitch<SectionKind>(CachedName)
+               .Case("rog_gcbss", SectionKind::getBSS())
                .Case(".bss", SectionKind::getBSS())
                .StartsWith(".bss.", SectionKind::getBSS())
                .StartsWith(".gnu.linkonce.b.", SectionKind::getBSS())

@@ -87,7 +87,7 @@ void ROGCheckPointInsertionImpl::insertCheckPointAt(Instruction *ir) {
                 INT32_MAX >> 1,
             })
         )
-    )->setCallingConv(CallingConv::Cold);
+    )->setCallingConv(CallingConv::ROG_Cold);
 }
 
 void ROGCheckPointInsertionImpl::insertCheckPointForLoops(LoopInfo &li) {

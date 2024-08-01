@@ -95,6 +95,9 @@ namespace CallingConv {
     /// of 6) and return values (8 instead of 2).
     ROG = 50,
 
+    /// Like `ROG` and `Cold` fused together.
+    ROG_Cold = 51,
+
     /// This is the start of the target-specific calling conventions, e.g.
     /// fastcall and thiscall on X86.
     FirstTargetCC = 64,

@@ -1182,8 +1182,9 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
   // for segmented stacks (libgcc is one), will result in allocating stack
   // space in small chunks instead of one large contiguous block.
   if (MF.shouldSplitStack()) {
-    if (MF.getFunction().getCallingConv() == CallingConv::ROG)
-      report_fatal_error("ROG calling convention does not support Segmented Stack.");
+    if (MF.getFunction().getCallingConv() == CallingConv::ROG ||
+        MF.getFunction().getCallingConv() == CallingConv::ROG_Cold)
+      report_fatal_error("ROG calling conventions do not support Segmented Stack.");
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }

@@ -28,7 +28,7 @@ static FunctionCallee getOrInsertFunction(Module *mod, StringRef name, Type *ret
     );
 
     /* mark as cold function */
-    fn->setCallingConv(CallingConv::Cold);
+    fn->setCallingConv(CallingConv::ROG_Cold);
     return FunctionCallee(ty, fn);
 }
 }

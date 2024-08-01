@@ -3125,8 +3125,11 @@ static void computeCalleeSaveRegisterPairs(
   (void)CC;
   // MachO's compact unwind format relies on all registers being stored in
   // pairs.
-  assert((!produceCompactUnwindFrame(MF) || CC == CallingConv::Cold ||
-          CC == CallingConv::PreserveMost || CC == CallingConv::PreserveAll ||
+  assert((!produceCompactUnwindFrame(MF) ||
+          CC == CallingConv::Cold ||
+          CC == CallingConv::ROG_Cold ||
+          CC == CallingConv::PreserveMost ||
+          CC == CallingConv::PreserveAll ||
           CC == CallingConv::CXX_FAST_TLS ||
           CC == CallingConv::Win64 || (Count & 1) == 0) &&
          "Odd number of callee-saved regs to spill!");
@@ -3229,8 +3232,11 @@ static void computeCalleeSaveRegisterPairs(
 
     // MachO's compact unwind format relies on all registers being stored in
     // adjacent register pairs.
-    assert((!produceCompactUnwindFrame(MF) || CC == CallingConv::Cold ||
-            CC == CallingConv::PreserveMost || CC == CallingConv::PreserveAll ||
+    assert((!produceCompactUnwindFrame(MF) ||
+            CC == CallingConv::Cold ||
+            CC == CallingConv::ROG_Cold ||
+            CC == CallingConv::PreserveMost ||
+            CC == CallingConv::PreserveAll ||
             CC == CallingConv::CXX_FAST_TLS ||
             CC == CallingConv::Win64 ||
             (RPI.isPaired() &&

@@ -2910,6 +2910,7 @@ bool AArch64FastISel::fastLowerArguments() {
   CallingConv::ID CC = F->getCallingConv();
   if (CC != CallingConv::C &&
       CC != CallingConv::ROG &&
+      CC != CallingConv::ROG_Cold &&
       CC != CallingConv::Swift)
     return false;
 

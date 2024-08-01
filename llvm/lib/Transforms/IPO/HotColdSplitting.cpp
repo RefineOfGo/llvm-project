@@ -221,7 +221,8 @@ bool HotColdSplitting::isFunctionCold(const Function &F) const {
   if (F.hasFnAttribute(Attribute::Cold))
     return true;
 
-  if (F.getCallingConv() == CallingConv::Cold)
+  if (F.getCallingConv() == CallingConv::Cold ||
+      F.getCallingConv() == CallingConv::ROG_Cold)
     return true;
 
   if (PSI->isFunctionEntryCold(&F))

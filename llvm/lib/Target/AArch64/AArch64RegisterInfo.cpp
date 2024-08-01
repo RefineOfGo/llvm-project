@@ -77,7 +77,8 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_AArch64_NoRegs_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::PreserveNone)
     return CSR_AArch64_NoneRegs_SaveList;
-  if (MF->getFunction().getCallingConv() == CallingConv::Cold)
+  if (MF->getFunction().getCallingConv() == CallingConv::Cold ||
+      MF->getFunction().getCallingConv() == CallingConv::ROG_Cold)
     return CSR_AArch64_Cold_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::AnyReg)
     return CSR_AArch64_AllRegs_SaveList;
@@ -197,6 +198,9 @@ AArch64RegisterInfo::getDarwinCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_Darwin_AArch64_RT_MostRegs_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::PreserveAll)
     return CSR_Darwin_AArch64_RT_AllRegs_SaveList;
+  if (MF->getFunction().getCallingConv() == CallingConv::Cold ||
+      MF->getFunction().getCallingConv() == CallingConv::ROG_Cold)
+    return CSR_Darwin_AArch64_Cold_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::Win64)
     return CSR_Darwin_AArch64_AAPCS_Win64_SaveList;
   return CSR_Darwin_AArch64_AAPCS_SaveList;
@@ -290,8 +294,8 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   if (CC == CallingConv::AnyReg)
     return SCS ? CSR_AArch64_AllRegs_SCS_RegMask : CSR_AArch64_AllRegs_RegMask;
 
-  // CallingConv::Cold does not support stack shadowing.
-  if (CC == CallingConv::Cold) {
+  // "coldcc" or "rog_coldcc" does not support stack shadowing.
+  if (CC == CallingConv::Cold || CC == CallingConv::ROG_Cold) {
     if (SCS)
       report_fatal_error("ShadowCallStack attribute not available for coldcc.");
     return CSR_AArch64_Cold_RegMask;
@@ -638,6 +642,7 @@ bool AArch64RegisterInfo::isArgumentRegister(const MachineFunction &MF,
     [[fallthrough]];
   case CallingConv::C:
   case CallingConv::ROG:
+  case CallingConv::ROG_Cold:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::PreserveMost:

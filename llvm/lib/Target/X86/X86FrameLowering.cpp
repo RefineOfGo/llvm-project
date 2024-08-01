@@ -3214,7 +3214,8 @@ void X86FrameLowering::adjustForSegmentedStacks(
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
   assert(MF.getFunction().getCallingConv() != CallingConv::ROG &&
-         "ROG calling convention does not support segmented stacks.");
+         MF.getFunction().getCallingConv() != CallingConv::ROG_Cold &&
+         "ROG calling conventions do not support segmented stacks.");
 
   unsigned ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);
   assert(!MF.getRegInfo().isLiveIn(ScratchReg) &&

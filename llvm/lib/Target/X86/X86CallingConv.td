@@ -526,8 +526,9 @@ def RetCC_X86_32 : CallingConv<[
 
 // This is the root return-value convention for the X86-64 backend.
 def RetCC_X86_64 : CallingConv<[
-  // ROG uses RetCC_X86_64_ROG
+  // ROG or ROG_Cold uses RetCC_X86_64_ROG
   CCIfCC<"CallingConv::ROG", CCDelegateTo<RetCC_X86_64_ROG>>,
+  CCIfCC<"CallingConv::ROG_Cold", CCDelegateTo<RetCC_X86_64_ROG>>,
 
   // HiPE uses RetCC_X86_64_HiPE
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<RetCC_X86_64_HiPE>>,
@@ -1209,6 +1210,7 @@ def CC_X86_32 : CallingConv<[
 // This is the root argument convention for the X86-64 backend.
 def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::ROG", CCDelegateTo<CC_X86_64_ROG>>,
+  CCIfCC<"CallingConv::ROG_Cold", CCDelegateTo<CC_X86_64_ROG>>,
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_64_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_64_HiPE>>,
   CCIfCC<"CallingConv::AnyReg", CCDelegateTo<CC_X86_64_AnyReg>>,

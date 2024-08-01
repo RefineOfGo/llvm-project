@@ -131,7 +131,7 @@ void ROGGCLoweringImpl::invokeBefore(CallInst *ir, ArrayRef<Value *> args, Funct
             1,
             INT32_MAX >> 1,
         })
-    ))->setCallingConv(CallingConv::Cold);
+    ))->setCallingConv(CallingConv::ROG_Cold);
 }
 
 void ROGGCLoweringImpl::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {

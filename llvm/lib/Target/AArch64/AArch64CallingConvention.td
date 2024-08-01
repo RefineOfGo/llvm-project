@@ -652,12 +652,10 @@ def CSR_AArch64_TLS_ELF
     : CalleeSavedRegs<(add (sequence "X%u", 1, 28), FP,
                            (sequence "Q%u", 0, 31))>;
 
-// The "coldcc" calling convention makes the caller as efficient as
-// possible by preserving most commonly used registers across function calls.
-def CSR_AArch64_Cold
-    : CalleeSavedRegs<(add (sequence "X%u", 0, 15),
-                           (sequence "X%u", 18, 28), LR, FP,
-                           (sequence "D%u", 0, 31))>;
+// The "coldcc" and "rog_coldcc" calling convention makes the caller as efficient as
+// possible by preserving most registers across function calls (except X16 and X17).
+def CSR_AArch64_Cold : CalleeSavedRegs<(add (sequence "X%u", 0, 15),
+                                            CSR_AArch64_AAPCS)>;
 
 def CSR_AArch64_AllRegs
     : CalleeSavedRegs<(add (sequence "W%u", 0, 30), WSP,
@@ -734,6 +732,9 @@ def CSR_Darwin_AArch64_CXX_TLS_PE
 // CSRs that are handled explicitly via copies.
 def CSR_Darwin_AArch64_CXX_TLS_ViaCopy
     : CalleeSavedRegs<(sub CSR_Darwin_AArch64_CXX_TLS, LR, FP)>;
+
+def CSR_Darwin_AArch64_Cold : CalleeSavedRegs<(add CSR_Darwin_AArch64_AAPCS,
+                                                   (sequence "X%u", 0, 15))>;
 
 def CSR_Darwin_AArch64_RT_MostRegs
     : CalleeSavedRegs<(add CSR_Darwin_AArch64_AAPCS, (sequence "X%u", 9, 15))>;

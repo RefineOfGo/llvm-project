@@ -22,6 +22,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MathExtras.h"
@@ -40,6 +41,14 @@ using namespace llvm;
 #define GET_INSTRUCTION_NAME
 #define PRINT_ALIAS_INSTR
 #include "AArch64GenAsmWriter1.inc"
+
+static cl::opt<bool> EmitX29AsFP("emit-x29-as-fp",
+                                 cl::desc("Emit X29 register as FP"),
+                                 cl::init(true));
+
+static cl::opt<bool> EmitX30AsLR("emit-x30-as-lr",
+                                 cl::desc("Emit X30 register as LR"),
+                                 cl::init(true));
 
 AArch64InstPrinter::AArch64InstPrinter(const MCAsmInfo &MAI,
                                        const MCInstrInfo &MII,
@@ -70,6 +79,15 @@ void AArch64InstPrinter::printRegName(raw_ostream &OS, MCRegister Reg,
 
 StringRef AArch64InstPrinter::getRegName(MCRegister Reg) const {
   return getRegisterName(Reg);
+}
+
+const char *AArch64InstPrinter::getRegisterName(MCRegister Reg) {
+  if (EmitX29AsFP && Reg == AArch64::FP)
+    return "fp";
+  else if (EmitX30AsLR && Reg == AArch64::LR)
+    return "lr";
+  else
+    return getRegisterName(Reg, AArch64::NoRegAltName);
 }
 
 void AArch64InstPrinter::printInst(const MCInst *MI, uint64_t Address,

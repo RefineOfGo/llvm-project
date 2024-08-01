@@ -45,8 +45,8 @@ public:
 
   virtual StringRef getRegName(MCRegister Reg) const;
 
-  static const char *getRegisterName(MCRegister Reg,
-                                     unsigned AltIdx = AArch64::NoRegAltName);
+  static const char *getRegisterName(MCRegister Reg);
+  static const char *getRegisterName(MCRegister Reg, unsigned AltIdx);
 
 protected:
   bool printSysAlias(const MCInst *MI, const MCSubtargetInfo &STI,

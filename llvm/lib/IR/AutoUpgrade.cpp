@@ -4752,6 +4752,9 @@ void llvm::UpgradeIntrinsicCall(CallBase *CI, Function *NewFn) {
     break;
   }
 
+  case Intrinsic::gcmemset:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
   case Intrinsic::memcpy:
   case Intrinsic::memmove:
   case Intrinsic::memset: {
@@ -4782,7 +4785,7 @@ void llvm::UpgradeIntrinsicCall(CallBase *CI, Function *NewFn) {
     const ConstantInt *Align = cast<ConstantInt>(CI->getArgOperand(3));
     MemCI->setDestAlignment(Align->getMaybeAlignValue());
     // Memcpy/Memmove also support source alignment.
-    if (auto *MTI = dyn_cast<MemTransferInst>(MemCI))
+    if (auto *MTI = dyn_cast<NonAtomicMemTransferInst>(MemCI))
       MTI->setSourceAlignment(Align->getMaybeAlignValue());
     break;
   }

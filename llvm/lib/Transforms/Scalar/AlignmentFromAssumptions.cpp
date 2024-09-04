@@ -246,7 +246,7 @@ bool AlignmentFromAssumptionsPass::processAssumption(CallInst *ACall,
 
       // For memory transfers, there is also a source alignment that
       // can be set.
-      if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(MI)) {
+      if (NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(MI)) {
         Align NewSrcAlignment =
             getNewAlignment(AASCEV, AlignSCEV, OffSCEV, MTI->getSource(), SE);
 

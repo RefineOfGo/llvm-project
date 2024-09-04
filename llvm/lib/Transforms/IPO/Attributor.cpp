@@ -907,7 +907,7 @@ bool AA::isPotentiallyAffectedByBarrier(Attributor &A, const Instruction &I,
   if (const MemIntrinsic *MI = dyn_cast<MemIntrinsic>(&I)) {
     if (!AddLocationPtr(MemoryLocation::getForDest(MI)))
       return true;
-    if (const MemTransferInst *MTI = dyn_cast<MemTransferInst>(&I))
+    if (const NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(&I))
       if (!AddLocationPtr(MemoryLocation::getForSource(MTI)))
         return true;
   } else if (!AddLocationPtr(MemoryLocation::getOrNone(&I)))

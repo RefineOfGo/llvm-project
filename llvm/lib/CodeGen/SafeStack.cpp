@@ -255,7 +255,7 @@ bool SafeStack::IsAccessSafe(Value *Addr, uint64_t AccessSize,
 bool SafeStack::IsMemIntrinsicSafe(const MemIntrinsic *MI, const Use &U,
                                    const Value *AllocaPtr,
                                    uint64_t AllocaSize) {
-  if (auto MTI = dyn_cast<MemTransferInst>(MI)) {
+  if (auto MTI = dyn_cast<NonAtomicMemTransferInst>(MI)) {
     if (MTI->getRawSource() != U && MTI->getRawDest() != U)
       return true;
   } else {

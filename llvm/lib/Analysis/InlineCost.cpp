@@ -2308,6 +2308,9 @@ bool CallAnalyzer::visitCallBase(CallBase &Call) {
       onLoadRelativeIntrinsic();
       return false;
 
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memset:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:

@@ -583,6 +583,12 @@ public:
   // Intrinsic creation methods
   //===--------------------------------------------------------------------===//
 
+  CallInst *CreateGCWrite(Value *Val, Value *Obj, Value *Ptr,
+                          bool isVolatile = false,
+                          MDNode *TBAATag = nullptr,
+                          MDNode *ScopeTag = nullptr,
+                          MDNode *NoAliasTag = nullptr);
+
   /// Create and insert a memset to the specified pointer and the
   /// specified value.
   ///
@@ -597,16 +603,44 @@ public:
                         TBAATag, ScopeTag, NoAliasTag);
   }
 
-  CallInst *CreateMemSet(Value *Ptr, Value *Val, Value *Size, MaybeAlign Align,
+  CallInst *CreateGCMemSet(Value *Ptr, Value *Val, uint64_t Size,
+                           MaybeAlign Align, bool isVolatile = false,
+                           MDNode *TBAATag = nullptr, MDNode *ScopeTag = nullptr,
+                           MDNode *NoAliasTag = nullptr) {
+    return CreateGCMemSet(Ptr, Val, getInt64(Size), Align, isVolatile,
+                          TBAATag, ScopeTag, NoAliasTag);
+  }
+
+  CallInst *CreateMemSet(Intrinsic::ID IntrID, Value *Ptr, Value *Val,
+                         Value *Size, MaybeAlign Align,
                          bool isVolatile = false, MDNode *TBAATag = nullptr,
                          MDNode *ScopeTag = nullptr,
                          MDNode *NoAliasTag = nullptr);
 
+  CallInst *CreateMemSet(Value *Ptr, Value *Val, Value *Size, MaybeAlign Align,
+                         bool isVolatile = false, MDNode *TBAATag = nullptr,
+                         MDNode *ScopeTag = nullptr,
+                         MDNode *NoAliasTag = nullptr) {
+    return CreateMemSet(Intrinsic::memset, Ptr, Val, Size, Align, isVolatile,
+                        TBAATag, ScopeTag, NoAliasTag);
+  }
+
+  CallInst *CreateGCMemSet(Value *Ptr, Value *Val, Value *Size, MaybeAlign Align,
+                           bool isVolatile = false, MDNode *TBAATag = nullptr,
+                           MDNode *ScopeTag = nullptr,
+                           MDNode *NoAliasTag = nullptr) {
+    return CreateMemSet(Intrinsic::gcmemset, Ptr, Val, Size, Align, isVolatile,
+                        TBAATag, ScopeTag, NoAliasTag);
+  }
+
   CallInst *CreateMemSetInline(Value *Dst, MaybeAlign DstAlign, Value *Val,
-                               Value *Size, bool IsVolatile = false,
+                               Value *Size, bool isVolatile = false,
                                MDNode *TBAATag = nullptr,
                                MDNode *ScopeTag = nullptr,
-                               MDNode *NoAliasTag = nullptr);
+                               MDNode *NoAliasTag = nullptr) {
+    return CreateMemSet(Intrinsic::memset_inline, Dst, Val, Size, DstAlign,
+                        isVolatile, TBAATag, ScopeTag, NoAliasTag);
+  }
 
   /// Create and insert an element unordered-atomic memset of the region of
   /// memory starting at the given pointer to the given value.
@@ -664,6 +698,17 @@ public:
                         NoAliasTag);
   }
 
+  CallInst *CreateGCMemCpy(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                           MaybeAlign SrcAlign, uint64_t Size,
+                           bool isVolatile = false, MDNode *TBAATag = nullptr,
+                           MDNode *TBAAStructTag = nullptr,
+                           MDNode *ScopeTag = nullptr,
+                           MDNode *NoAliasTag = nullptr) {
+    return CreateGCMemCpy(Dst, DstAlign, Src, SrcAlign, getInt64(Size),
+                          isVolatile, TBAATag, TBAAStructTag, ScopeTag,
+                          NoAliasTag);
+  }
+
   CallInst *CreateMemTransferInst(
       Intrinsic::ID IntrID, Value *Dst, MaybeAlign DstAlign, Value *Src,
       MaybeAlign SrcAlign, Value *Size, bool isVolatile = false,
@@ -677,6 +722,17 @@ public:
                          MDNode *ScopeTag = nullptr,
                          MDNode *NoAliasTag = nullptr) {
     return CreateMemTransferInst(Intrinsic::memcpy, Dst, DstAlign, Src,
+                                 SrcAlign, Size, isVolatile, TBAATag,
+                                 TBAAStructTag, ScopeTag, NoAliasTag);
+  }
+
+  CallInst *CreateGCMemCpy(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                           MaybeAlign SrcAlign, Value *Size,
+                           bool isVolatile = false, MDNode *TBAATag = nullptr,
+                           MDNode *TBAAStructTag = nullptr,
+                           MDNode *ScopeTag = nullptr,
+                           MDNode *NoAliasTag = nullptr) {
+    return CreateMemTransferInst(Intrinsic::gcmemcpy, Dst, DstAlign, Src,
                                  SrcAlign, Size, isVolatile, TBAATag,
                                  TBAAStructTag, ScopeTag, NoAliasTag);
   }
@@ -714,12 +770,32 @@ public:
                          isVolatile, TBAATag, ScopeTag, NoAliasTag);
   }
 
+  CallInst *CreateGCMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                            MaybeAlign SrcAlign, uint64_t Size,
+                            bool isVolatile = false, MDNode *TBAATag = nullptr,
+                            MDNode *ScopeTag = nullptr,
+                            MDNode *NoAliasTag = nullptr) {
+    return CreateGCMemMove(Dst, DstAlign, Src, SrcAlign, getInt64(Size),
+                           isVolatile, TBAATag, ScopeTag, NoAliasTag);
+  }
+
   CallInst *CreateMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
                           MaybeAlign SrcAlign, Value *Size,
                           bool isVolatile = false, MDNode *TBAATag = nullptr,
                           MDNode *ScopeTag = nullptr,
                           MDNode *NoAliasTag = nullptr) {
     return CreateMemTransferInst(Intrinsic::memmove, Dst, DstAlign, Src,
+                                 SrcAlign, Size, isVolatile, TBAATag,
+                                 /*TBAAStructTag=*/nullptr, ScopeTag,
+                                 NoAliasTag);
+  }
+
+  CallInst *CreateGCMemMove(Value *Dst, MaybeAlign DstAlign, Value *Src,
+                            MaybeAlign SrcAlign, Value *Size,
+                            bool isVolatile = false, MDNode *TBAATag = nullptr,
+                            MDNode *ScopeTag = nullptr,
+                            MDNode *NoAliasTag = nullptr) {
+    return CreateMemTransferInst(Intrinsic::gcmemmove, Dst, DstAlign, Src,
                                  SrcAlign, Size, isVolatile, TBAATag,
                                  /*TBAAStructTag=*/nullptr, ScopeTag,
                                  NoAliasTag);

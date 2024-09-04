@@ -1604,6 +1604,7 @@ public:
         return TargetTransformInfo::TCC_Basic;
       break;
 
+    case Intrinsic::gcmemcpy:
     case Intrinsic::memcpy:
       return thisT()->getMemcpyCost(ICA.getInst());
 

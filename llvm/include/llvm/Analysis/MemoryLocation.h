@@ -27,7 +27,6 @@ class CallBase;
 class Instruction;
 class LoadInst;
 class StoreInst;
-class MemTransferInst;
 class MemIntrinsic;
 class AtomicCmpXchgInst;
 class AtomicMemTransferInst;
@@ -35,6 +34,7 @@ class AtomicMemIntrinsic;
 class AtomicRMWInst;
 class AnyMemTransferInst;
 class AnyMemIntrinsic;
+class NonAtomicMemTransferInst;
 class TargetLibraryInfo;
 class VAArgInst;
 class Value;
@@ -263,7 +263,7 @@ public:
   static std::optional<MemoryLocation> getOrNone(const Instruction *Inst);
 
   /// Return a location representing the source of a memory transfer.
-  static MemoryLocation getForSource(const MemTransferInst *MTI);
+  static MemoryLocation getForSource(const NonAtomicMemTransferInst *MTI);
   static MemoryLocation getForSource(const AtomicMemTransferInst *MTI);
   static MemoryLocation getForSource(const AnyMemTransferInst *MTI);
 

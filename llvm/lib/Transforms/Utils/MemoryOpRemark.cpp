@@ -30,6 +30,9 @@ bool MemoryOpRemark::canHandle(const Instruction *I, const TargetLibraryInfo &TL
 
   if (auto *II = dyn_cast<IntrinsicInst>(I)) {
     switch (II->getIntrinsicID()) {
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memcpy_inline:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:
@@ -190,6 +193,15 @@ void MemoryOpRemark::visitIntrinsicCall(const IntrinsicInst &II) {
   bool Atomic = false;
   bool Inline = false;
   switch (II.getIntrinsicID()) {
+  case Intrinsic::gcmemset:
+    CallTo = "gcmemset";
+    break;
+  case Intrinsic::gcmemcpy:
+    CallTo = "gcmemcpy";
+    break;
+  case Intrinsic::gcmemmove:
+    CallTo = "gcmemmove";
+    break;
   case Intrinsic::memcpy_inline:
     CallTo = "memcpy";
     Inline = true;
@@ -227,6 +239,8 @@ void MemoryOpRemark::visitIntrinsicCall(const IntrinsicInst &II) {
   // No such thing as a memory intrinsic that is both atomic and volatile.
   bool Volatile = !Atomic && CIVolatile && CIVolatile->getZExtValue();
   switch (II.getIntrinsicID()) {
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
   case Intrinsic::memcpy_inline:
   case Intrinsic::memcpy:
   case Intrinsic::memmove:
@@ -234,6 +248,7 @@ void MemoryOpRemark::visitIntrinsicCall(const IntrinsicInst &II) {
     visitPtr(II.getOperand(1), /*IsRead=*/true, *R);
     visitPtr(II.getOperand(0), /*IsRead=*/false, *R);
     break;
+  case Intrinsic::gcmemset:
   case Intrinsic::memset:
   case Intrinsic::memset_element_unordered_atomic:
     visitPtr(II.getOperand(0), /*IsRead=*/false, *R);

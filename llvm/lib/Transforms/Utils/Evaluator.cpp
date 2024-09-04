@@ -389,7 +389,7 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst, BasicBlock *&NextBB,
       }
 
       if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&CB)) {
-        if (MemSetInst *MSI = dyn_cast<MemSetInst>(II)) {
+        if (NonAtomicMemSetInst *MSI = dyn_cast<NonAtomicMemSetInst>(II)) {
           if (MSI->isVolatile()) {
             LLVM_DEBUG(dbgs() << "Can not optimize a volatile memset "
                               << "intrinsic.\n");

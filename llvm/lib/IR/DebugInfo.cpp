@@ -2086,12 +2086,12 @@ void at::trackAssignments(Function::iterator Start, Function::iterator End,
         Info = getAssignmentInfo(DL, SI);
         ValueComponent = SI->getValueOperand();
         DestComponent = SI->getPointerOperand();
-      } else if (auto *MI = dyn_cast<MemTransferInst>(&I)) {
+      } else if (auto *MI = dyn_cast<NonAtomicMemTransferInst>(&I)) {
         Info = getAssignmentInfo(DL, MI);
         // May not be able to represent this value easily.
         ValueComponent = Undef;
         DestComponent = MI->getOperand(0);
-      } else if (auto *MI = dyn_cast<MemSetInst>(&I)) {
+      } else if (auto *MI = dyn_cast<NonAtomicMemSetInst>(&I)) {
         Info = getAssignmentInfo(DL, MI);
         // If we're zero-initing we can state the assigned value is zero,
         // otherwise use undef.

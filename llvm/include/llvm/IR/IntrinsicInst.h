@@ -953,6 +953,29 @@ public:
   }
 };
 
+/// Represents a llvm.gcwrite intrinsic.
+class GCWriteInst : public IntrinsicInst {
+private:
+  enum { ARG_VAL = 0, ARG_OBJ = 1, ARG_PTR = 2 };
+
+public:
+  Value *getValueOperand() const {
+    return const_cast<Value *>(getArgOperand(ARG_VAL));
+  }
+  Value *getObjectOperand() const {
+    return const_cast<Value *>(getArgOperand(ARG_OBJ));
+  }
+  Value *getPointerOperand() const {
+    return const_cast<Value *>(getArgOperand(ARG_PTR));
+  }
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcwrite;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 /// Common base class for all memory intrinsics. Simply provides
 /// common methods.
 /// Written as CRTP to avoid a common base class amongst the
@@ -1208,6 +1231,9 @@ public:
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:
     case Intrinsic::memset:
@@ -1223,8 +1249,65 @@ public:
   }
 };
 
+/// This class wraps the llvm.gcmemset/memset intrinsics.
+class NonAtomicMemSetInst : public MemSetBase<MemIntrinsic> {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemset ||
+           I->getIntrinsicID() == Intrinsic::memset ||
+           I->getIntrinsicID() == Intrinsic::memset_inline;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemcpy/gcmemmove/memcpy/memmove intrinsics.
+class NonAtomicMemTransferInst : public MemTransferBase<MemIntrinsic> {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemcpy ||
+           I->getIntrinsicID() == Intrinsic::gcmemmove ||
+           I->getIntrinsicID() == Intrinsic::memcpy ||
+           I->getIntrinsicID() == Intrinsic::memcpy_inline ||
+           I->getIntrinsicID() == Intrinsic::memmove;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemcpy/memcpy/memcpy_inline intrinsic.
+class NonAtomicMemCpyInst : public NonAtomicMemTransferInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemcpy ||
+           I->getIntrinsicID() == Intrinsic::memcpy ||
+           I->getIntrinsicID() == Intrinsic::memcpy_inline;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemmove/memmove intrinsic.
+class NonAtomicMemMoveInst : public NonAtomicMemTransferInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemmove ||
+           I->getIntrinsicID() == Intrinsic::memmove;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 /// This class wraps the llvm.memset and llvm.memset.inline intrinsics.
-class MemSetInst : public MemSetBase<MemIntrinsic> {
+class MemSetInst : public NonAtomicMemSetInst {
 public:
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const IntrinsicInst *I) {
@@ -1254,7 +1337,7 @@ public:
 };
 
 /// This class wraps the llvm.memcpy/memmove intrinsics.
-class MemTransferInst : public MemTransferBase<MemIntrinsic> {
+class MemTransferInst : public NonAtomicMemTransferInst {
 public:
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const IntrinsicInst *I) {
@@ -1309,9 +1392,59 @@ public:
   }
 };
 
+/// This class wraps the llvm.gcmemset intrinsics.
+class GCMemSetInst : public NonAtomicMemSetInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemset;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemcpy/gcmemmove intrinsics.
+class GCMemTransferInst : public NonAtomicMemTransferInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemcpy ||
+           I->getIntrinsicID() == Intrinsic::gcmemmove;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemcpy intrinsic.
+class GCMemCpyInst : public GCMemTransferInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemcpy;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class wraps the llvm.gcmemmove intrinsic.
+class GCMemMoveInst : public GCMemTransferInst {
+public:
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::gcmemmove;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 // The common base class for any memset/memmove/memcpy intrinsics;
 // whether they be atomic or non-atomic.
 // i.e. llvm.element.unordered.atomic.memset/memcpy/memmove
+//  and llvm.gcmemset/gcmemcpy/gcmemmove
 //  and llvm.memset/memcpy/memmove
 class AnyMemIntrinsic : public MemIntrinsicBase<AnyMemIntrinsic> {
 public:
@@ -1324,6 +1457,9 @@ public:
 
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memcpy:
     case Intrinsic::memcpy_inline:
     case Intrinsic::memmove:
@@ -1344,11 +1480,13 @@ public:
 
 /// This class represents any memset intrinsic
 // i.e. llvm.element.unordered.atomic.memset
+// and  llvm.gcmemset
 // and  llvm.memset
 class AnyMemSetInst : public MemSetBase<AnyMemIntrinsic> {
 public:
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemset:
     case Intrinsic::memset:
     case Intrinsic::memset_inline:
     case Intrinsic::memset_element_unordered_atomic:
@@ -1369,6 +1507,8 @@ class AnyMemTransferInst : public MemTransferBase<AnyMemIntrinsic> {
 public:
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
     case Intrinsic::memcpy:
     case Intrinsic::memcpy_inline:
     case Intrinsic::memmove:
@@ -1391,6 +1531,7 @@ class AnyMemCpyInst : public AnyMemTransferInst {
 public:
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemcpy:
     case Intrinsic::memcpy:
     case Intrinsic::memcpy_inline:
     case Intrinsic::memcpy_element_unordered_atomic:
@@ -1411,6 +1552,7 @@ class AnyMemMoveInst : public AnyMemTransferInst {
 public:
   static bool classof(const IntrinsicInst *I) {
     switch (I->getIntrinsicID()) {
+    case Intrinsic::gcmemmove:
     case Intrinsic::memmove:
     case Intrinsic::memmove_element_unordered_atomic:
       return true;

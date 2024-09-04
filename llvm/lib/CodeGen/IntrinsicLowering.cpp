@@ -232,6 +232,12 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
   case Intrinsic::not_intrinsic:
     report_fatal_error("Cannot lower a call to a non-intrinsic function '"+
                       Callee->getName() + "'!");
+
+  case Intrinsic::gcmemset:
+  case Intrinsic::gcmemcpy:
+  case Intrinsic::gcmemmove:
+    llvm_unreachable("llvm.gcmem{set,cpy,move} should have been lowered already.");
+
   default:
     report_fatal_error("Code generator does not support intrinsic function '"+
                       Callee->getName()+"'!");

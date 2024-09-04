@@ -52,7 +52,7 @@ cl::opt<bool> EnableInferAlignmentPass(
 /// location, we can optimize this.
 static bool
 isOnlyCopiedFromConstantMemory(AAResults *AA, AllocaInst *V,
-                               MemTransferInst *&TheCopy,
+                               NonAtomicMemTransferInst *&TheCopy,
                                SmallVectorImpl<Instruction *> &ToDelete) {
   // We track lifetime intrinsics as we encounter them.  If we decide to go
   // ahead and replace the value with the memory location, this lets the caller
@@ -134,7 +134,7 @@ isOnlyCopiedFromConstantMemory(AAResults *AA, AllocaInst *V,
 
       // If this is isn't our memcpy/memmove, reject it as something we can't
       // handle.
-      MemTransferInst *MI = dyn_cast<MemTransferInst>(I);
+      NonAtomicMemTransferInst *MI = dyn_cast<NonAtomicMemTransferInst>(I);
       if (!MI)
         return false;
 
@@ -172,11 +172,11 @@ isOnlyCopiedFromConstantMemory(AAResults *AA, AllocaInst *V,
 /// modified by a copy from a constant memory location. If we can prove this, we
 /// can replace any uses of the alloca with uses of the memory location
 /// directly.
-static MemTransferInst *
+static NonAtomicMemTransferInst *
 isOnlyCopiedFromConstantMemory(AAResults *AA,
                                AllocaInst *AI,
                                SmallVectorImpl<Instruction *> &ToDelete) {
-  MemTransferInst *TheCopy = nullptr;
+  NonAtomicMemTransferInst *TheCopy = nullptr;
   if (isOnlyCopiedFromConstantMemory(AA, AI, TheCopy, ToDelete))
     return TheCopy;
   return nullptr;
@@ -336,7 +336,7 @@ bool PointerReplacer::collectUsersRecursive(Instruction &I) {
       Worklist.insert(Inst);
       if (!collectUsersRecursive(*Inst))
         return false;
-    } else if (auto *MI = dyn_cast<MemTransferInst>(Inst)) {
+    } else if (auto *MI = dyn_cast<NonAtomicMemTransferInst>(Inst)) {
       if (MI->isVolatile())
         return false;
       Worklist.insert(Inst);
@@ -405,7 +405,7 @@ void PointerReplacer::replace(Instruction *I) {
     IC.InsertNewInstWith(NewSI, SI->getIterator());
     NewSI->takeName(SI);
     WorkMap[SI] = NewSI;
-  } else if (auto *MemCpy = dyn_cast<MemTransferInst>(I)) {
+  } else if (auto *MemCpy = dyn_cast<NonAtomicMemTransferInst>(I)) {
     auto *DestV = MemCpy->getRawDest();
     auto *SrcV = MemCpy->getRawSource();
 
@@ -506,7 +506,7 @@ Instruction *InstCombinerImpl::visitAllocaInst(AllocaInst &AI) {
   // constructs like "void foo() { int A[] = {1,2,3,4,5,6,7,8,9...}; }" if 'A'
   // is only subsequently read.
   SmallVector<Instruction *, 4> ToDelete;
-  if (MemTransferInst *Copy = isOnlyCopiedFromConstantMemory(AA, &AI, ToDelete)) {
+  if (NonAtomicMemTransferInst *Copy = isOnlyCopiedFromConstantMemory(AA, &AI, ToDelete)) {
     Value *TheSrc = Copy->getSource();
     Align AllocaAlign = AI.getAlign();
     Align SourceAlign = getOrEnforceKnownAlignment(

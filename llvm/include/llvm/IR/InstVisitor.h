@@ -206,12 +206,12 @@ public:
                                                   { DELEGATE(DbgInfoIntrinsic);}
   RetTy visitDbgLabelInst(DbgLabelInst &I)        { DELEGATE(DbgInfoIntrinsic);}
   RetTy visitDbgInfoIntrinsic(DbgInfoIntrinsic &I){ DELEGATE(IntrinsicInst); }
-  RetTy visitMemSetInst(MemSetInst &I)            { DELEGATE(MemIntrinsic); }
+  RetTy visitMemSetInst(MemSetInst &I)            { DELEGATE(NonAtomicMemSetInst); }
   RetTy visitMemSetInlineInst(MemSetInlineInst &I){ DELEGATE(MemSetInst); }
   RetTy visitMemCpyInst(MemCpyInst &I)            { DELEGATE(MemTransferInst); }
   RetTy visitMemCpyInlineInst(MemCpyInlineInst &I){ DELEGATE(MemCpyInst); }
   RetTy visitMemMoveInst(MemMoveInst &I)          { DELEGATE(MemTransferInst); }
-  RetTy visitMemTransferInst(MemTransferInst &I)  { DELEGATE(MemIntrinsic); }
+  RetTy visitMemTransferInst(MemTransferInst &I)  { DELEGATE(NonAtomicMemTransferInst); }
   RetTy visitMemIntrinsic(MemIntrinsic &I)        { DELEGATE(IntrinsicInst); }
   RetTy visitVAStartInst(VAStartInst &I)          { DELEGATE(IntrinsicInst); }
   RetTy visitVAEndInst(VAEndInst &I)              { DELEGATE(IntrinsicInst); }
@@ -220,6 +220,16 @@ public:
   RetTy visitCallInst(CallInst &I)                { DELEGATE(CallBase); }
   RetTy visitInvokeInst(InvokeInst &I)            { DELEGATE(CallBase); }
   RetTy visitCallBrInst(CallBrInst &I)            { DELEGATE(CallBase); }
+
+  RetTy visitGCMemSetInst(GCMemSetInst &I)           { DELEGATE(NonAtomicMemSetInst); }
+  RetTy visitGCMemCpyInst(GCMemCpyInst &I)           { DELEGATE(GCMemTransferInst); }
+  RetTy visitGCMemMoveInst(GCMemMoveInst &I)         { DELEGATE(GCMemTransferInst); }
+  RetTy visitGCMemTransferInst(GCMemTransferInst &I) { DELEGATE(NonAtomicMemTransferInst); }
+
+  RetTy visitNonAtomicMemSetInst(NonAtomicMemSetInst &I)           { DELEGATE(MemIntrinsic); }
+  RetTy visitNonAtomicMemCpyInst(NonAtomicMemCpyInst &I)           { DELEGATE(NonAtomicMemTransferInst); }
+  RetTy visitNonAtomicMemMoveInst(NonAtomicMemMoveInst &I)         { DELEGATE(NonAtomicMemTransferInst); }
+  RetTy visitNonAtomicMemTransferInst(NonAtomicMemTransferInst &I) { DELEGATE(MemIntrinsic); }
 
   // While terminators don't have a distinct type modeling them, we support
   // intercepting them with dedicated a visitor callback.
@@ -288,10 +298,13 @@ private:
       case Intrinsic::dbg_declare: DELEGATE(DbgDeclareInst);
       case Intrinsic::dbg_value:   DELEGATE(DbgValueInst);
       case Intrinsic::dbg_label:   DELEGATE(DbgLabelInst);
+      case Intrinsic::gcmemcpy:    DELEGATE(GCMemCpyInst);
       case Intrinsic::memcpy:      DELEGATE(MemCpyInst);
       case Intrinsic::memcpy_inline:
         DELEGATE(MemCpyInlineInst);
+      case Intrinsic::gcmemmove:   DELEGATE(GCMemMoveInst);
       case Intrinsic::memmove:     DELEGATE(MemMoveInst);
+      case Intrinsic::gcmemset:    DELEGATE(GCMemSetInst);
       case Intrinsic::memset:      DELEGATE(MemSetInst);
       case Intrinsic::memset_inline:
         DELEGATE(MemSetInlineInst);

@@ -722,12 +722,13 @@ def int_gcwrite       : Intrinsic<[],
                                   [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
                                   [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
                                    NoCapture<ArgIndex<2>>]>;
-def int_gcmemclr      : Intrinsic<[],
-                                  [llvm_anyptr_ty, llvm_anyint_ty, llvm_i1_ty],
+def int_gcmemset      : Intrinsic<[],
+                                  [llvm_anyptr_ty, llvm_i8_ty, llvm_anyint_ty,
+                                   llvm_i1_ty],
                                   [IntrWriteMem, IntrArgMemOnly, IntrWillReturn,
                                    IntrNoFree, IntrNoCallback,
                                    NoCapture<ArgIndex<0>>, WriteOnly<ArgIndex<0>>,
-                                   ImmArg<ArgIndex<2>>]>;
+                                   ImmArg<ArgIndex<3>>]>;
 def int_gcmemcpy      : Intrinsic<[],
                                   [llvm_anyptr_ty, llvm_anyptr_ty, llvm_anyint_ty,
                                    llvm_i1_ty],

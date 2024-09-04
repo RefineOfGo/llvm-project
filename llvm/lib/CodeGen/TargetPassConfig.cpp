@@ -1061,12 +1061,12 @@ bool TargetPassConfig::addISelPasses() {
     addPass(createLowerEmuTLSPass());
 
   PM->add(createTargetTransformInfoWrapperPass(TM->getTargetIRAnalysis()));
+  addPass(&ROGGCLoweringID);
   addPass(createPreISelIntrinsicLoweringPass());
   addPass(createExpandLargeDivRemPass());
   addPass(createExpandLargeFpConvertPass());
   addPass(createROGStackCheckPreparingPass());
   addPass(&ROGCheckPointInsertionID);
-  addPass(&ROGGCLoweringID);
   addPass(&GCLoweringID);
   addIRPasses();
   addCodeGenPrepare();

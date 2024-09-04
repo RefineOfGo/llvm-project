@@ -3173,6 +3173,9 @@ static bool isAllocSiteRemovable(Instruction *AI,
           default:
             return false;
 
+          case Intrinsic::gcmemset:
+          case Intrinsic::gcmemcpy:
+          case Intrinsic::gcmemmove:
           case Intrinsic::memmove:
           case Intrinsic::memcpy:
           case Intrinsic::memset: {

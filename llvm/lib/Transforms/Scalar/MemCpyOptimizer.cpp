@@ -175,7 +175,7 @@ public:
     if (auto *SI = dyn_cast<StoreInst>(Inst))
       addStore(OffsetFromFirst, SI);
     else
-      addMemSet(OffsetFromFirst, cast<MemSetInst>(Inst));
+      addMemSet(OffsetFromFirst, cast<NonAtomicMemSetInst>(Inst));
   }
 
   void addStore(int64_t OffsetFromFirst, StoreInst *SI) {
@@ -185,7 +185,7 @@ public:
              SI->getPointerOperand(), SI->getAlign(), SI);
   }
 
-  void addMemSet(int64_t OffsetFromFirst, MemSetInst *MSI) {
+  void addMemSet(int64_t OffsetFromFirst, NonAtomicMemSetInst *MSI) {
     int64_t Size = cast<ConstantInt>(MSI->getLength())->getZExtValue();
     addRange(OffsetFromFirst, Size, MSI->getDest(), MSI->getDestAlign(), MSI);
   }
@@ -390,7 +390,7 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
         continue;
     }
 
-    if (!isa<StoreInst>(BI) && !isa<MemSetInst>(BI)) {
+    if (!isa<StoreInst>(BI) && !isa<NonAtomicMemSetInst>(BI)) {
       // If the instruction is readnone, ignore it, otherwise bail out.  We
       // don't even allow readonly here because we don't want something like:
       // A[1] = 2; strlen(A); A[2] = 2; -> memcpy(A, ...); strlen(A).
@@ -430,7 +430,7 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
 
       Ranges.addStore(*Offset, NextStore);
     } else {
-      auto *MSI = cast<MemSetInst>(BI);
+      auto *MSI = cast<NonAtomicMemSetInst>(BI);
 
       if (MSI->isVolatile() || ByteVal != MSI->getValue() ||
           !isa<ConstantInt>(MSI->getLength()))
@@ -476,8 +476,16 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
     // Get the starting pointer of the block.
     StartPtr = Range.StartPtr;
 
-    AMemSet = Builder.CreateMemSet(StartPtr, ByteVal, Range.End - Range.Start,
-                                   Range.Alignment);
+    ConstantInt *Size = Builder.getInt64(Range.End - Range.Start);
+    bool IsGCMemSet = std::any_of(
+        Range.TheStores.begin(),
+        Range.TheStores.end(),
+        [](Instruction *Ins) { return isa<GCMemSetInst>(Ins); }
+    );
+
+    AMemSet = Builder.CreateMemSet(
+        IsGCMemSet ? Intrinsic::gcmemset : Intrinsic::memset,
+        StartPtr, ByteVal, Size, Range.Alignment);
     AMemSet->mergeDIAssignID(Range.TheStores);
 
     LLVM_DEBUG(dbgs() << "Replace stores:\n"; for (Instruction *SI
@@ -835,7 +843,7 @@ bool MemCpyOptPass::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
   return false;
 }
 
-bool MemCpyOptPass::processMemSet(MemSetInst *MSI, BasicBlock::iterator &BBI) {
+bool MemCpyOptPass::processMemSet(NonAtomicMemSetInst *MSI, BasicBlock::iterator &BBI) {
   // See if there is another memset or store neighboring this memset which
   // allows us to widen out the memset to do a single larger store.
   if (isa<ConstantInt>(MSI->getLength()) && !MSI->isVolatile())
@@ -910,7 +918,7 @@ bool MemCpyOptPass::performCallSlotOptzn(Instruction *cpyLoad,
   MemoryLocation DestLoc =
       isa<StoreInst>(cpyStore)
           ? MemoryLocation::get(cpyStore)
-          : MemoryLocation::getForDest(cast<MemCpyInst>(cpyStore));
+          : MemoryLocation::getForDest(cast<NonAtomicMemCpyInst>(cpyStore));
 
   // Check that nothing touches the dest of the copy between
   // the call and the store/memcpy.
@@ -1122,8 +1130,8 @@ bool MemCpyOptPass::performCallSlotOptzn(Instruction *cpyLoad,
 
 /// We've found that the (upward scanning) memory dependence of memcpy 'M' is
 /// the memcpy 'MDep'. Try to simplify M to copy from MDep's input if we can.
-bool MemCpyOptPass::processMemCpyMemCpyDependence(MemCpyInst *M,
-                                                  MemCpyInst *MDep,
+bool MemCpyOptPass::processMemCpyMemCpyDependence(NonAtomicMemCpyInst *M,
+                                                  NonAtomicMemCpyInst *MDep,
                                                   BatchAAResults &BAA) {
   // If dep instruction is reading from our current input, then it is a noop
   // transfer and substituting the input won't change this instruction. Just
@@ -1241,22 +1249,21 @@ bool MemCpyOptPass::processMemCpyMemCpyDependence(MemCpyInst *M,
 
   // TODO: Is this worth it if we're creating a less aligned memcpy? For
   // example we could be moving from movaps -> movq on x86.
-  Instruction *NewM;
-  if (UseMemMove)
-    NewM =
-        Builder.CreateMemMove(M->getDest(), M->getDestAlign(), CopySource,
-                              CopySourceAlign, M->getLength(), M->isVolatile());
-  else if (isa<MemCpyInlineInst>(M)) {
+  Intrinsic::ID IntrID;
+  if (UseMemMove) {
+    IntrID = isa<GCMemCpyInst>(M) ? Intrinsic::gcmemmove : Intrinsic::memmove;
+  } else if (isa<MemCpyInlineInst>(M)) {
     // llvm.memcpy may be promoted to llvm.memcpy.inline, but the converse is
     // never allowed since that would allow the latter to be lowered as a call
     // to an external function.
-    NewM = Builder.CreateMemCpyInline(M->getDest(), M->getDestAlign(),
-                                      CopySource, CopySourceAlign,
-                                      M->getLength(), M->isVolatile());
-  } else
-    NewM =
-        Builder.CreateMemCpy(M->getDest(), M->getDestAlign(), CopySource,
-                             CopySourceAlign, M->getLength(), M->isVolatile());
+    IntrID = Intrinsic::memcpy_inline;
+  } else {
+    IntrID = isa<GCMemCpyInst>(M) ? Intrinsic::gcmemcpy : Intrinsic::memcpy;
+  }
+
+  Instruction *NewM = Builder.CreateMemTransferInst(
+      IntrID, M->getDest(), M->getDestAlign(), CopySource, CopySourceAlign,
+      M->getLength(), M->isVolatile());
   NewM->copyMetadata(*M, LLVMContext::MD_DIAssignID);
 
   assert(isa<MemoryDef>(MSSAU->getMemorySSA()->getMemoryAccess(M)));
@@ -1289,8 +1296,8 @@ bool MemCpyOptPass::processMemCpyMemCpyDependence(MemCpyInst *M,
 ///
 /// The memset is sunk to just before the memcpy to ensure that src_size is
 /// present when emitting the simplified memset.
-bool MemCpyOptPass::processMemSetMemCpyDependence(MemCpyInst *MemCpy,
-                                                  MemSetInst *MemSet,
+bool MemCpyOptPass::processMemSetMemCpyDependence(NonAtomicMemCpyInst *MemCpy,
+                                                  NonAtomicMemSetInst *MemSet,
                                                   BatchAAResults &BAA) {
   // We can only transform memset/memcpy with the same destination.
   if (!BAA.isMustAlias(MemSet->getDest(), MemCpy->getDest()))
@@ -1367,7 +1374,8 @@ bool MemCpyOptPass::processMemSetMemCpyDependence(MemCpyInst *MemCpy,
   Value *MemsetLen = Builder.CreateSelect(
       Ule, ConstantInt::getNullValue(DestSize->getType()), SizeDiff);
   Instruction *NewMemSet =
-      Builder.CreateMemSet(Builder.CreatePtrAdd(Dest, SrcSize),
+      Builder.CreateMemSet(MemSet->getIntrinsicID(),
+                           Builder.CreatePtrAdd(Dest, SrcSize),
                            MemSet->getOperand(1), MemsetLen, Alignment);
 
   assert(isa<MemoryDef>(MSSAU->getMemorySSA()->getMemoryAccess(MemCpy)) &&
@@ -1432,8 +1440,8 @@ static bool hasUndefContents(MemorySSA *MSSA, BatchAAResults &AA, Value *V,
 ///   memset(dst2, c, dst2_size);
 /// \endcode
 /// When dst2_size <= dst1_size.
-bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
-                                               MemSetInst *MemSet,
+bool MemCpyOptPass::performMemCpyToMemSetOptzn(NonAtomicMemCpyInst *MemCpy,
+                                               NonAtomicMemSetInst *MemSet,
                                                BatchAAResults &BAA) {
   // Make sure that memcpy(..., memset(...), ...), that is we are memsetting and
   // memcpying from the same address. Otherwise it is hard to reason about.
@@ -1477,8 +1485,12 @@ bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
   }
 
   IRBuilder<> Builder(MemCpy);
+  Intrinsic::ID IntrID = isa<GCMemCpyInst>(MemCpy)
+      ? Intrinsic::gcmemset
+      : Intrinsic::memset;
+
   Instruction *NewM =
-      Builder.CreateMemSet(MemCpy->getRawDest(), MemSet->getOperand(1),
+      Builder.CreateMemSet(IntrID, MemCpy->getRawDest(), MemSet->getOperand(1),
                            CopySize, MemCpy->getDestAlign());
   auto *LastDef =
       cast<MemoryDef>(MSSAU->getMemorySSA()->getMemoryAccess(MemCpy));
@@ -1722,7 +1734,7 @@ static bool isZeroSize(Value *Size) {
 /// B to be a memcpy from X to Z (or potentially a memmove, depending on
 /// circumstances). This allows later passes to remove the first memcpy
 /// altogether.
-bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
+bool MemCpyOptPass::processMemCpy(NonAtomicMemCpyInst *M, BasicBlock::iterator &BBI) {
   // We can only optimize non-volatile memcpy's.
   if (M->isVolatile())
     return false;
@@ -1752,8 +1764,13 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
       if (Value *ByteVal = isBytewiseValue(GV->getInitializer(),
                                            M->getDataLayout())) {
         IRBuilder<> Builder(M);
+        Intrinsic::ID IntrID = isa<GCMemCpyInst>(M)
+            ? Intrinsic::gcmemset
+            : Intrinsic::memset;
+
         Instruction *NewM = Builder.CreateMemSet(
-            M->getRawDest(), ByteVal, M->getLength(), M->getDestAlign(), false);
+            IntrID, M->getRawDest(), ByteVal, M->getLength(),
+            M->getDestAlign(), false);
         auto *LastDef = cast<MemoryDef>(MA);
         auto *NewAccess =
             MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);
@@ -1776,7 +1793,7 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
   // The memcpy must post-dom the memset, so limit this to the same basic
   // block. A non-local generalization is likely not worthwhile.
   if (auto *MD = dyn_cast<MemoryDef>(DestClobber))
-    if (auto *MDep = dyn_cast_or_null<MemSetInst>(MD->getMemoryInst()))
+    if (auto *MDep = dyn_cast_or_null<NonAtomicMemSetInst>(MD->getMemoryInst()))
       if (DestClobber->getBlock() == M->getParent())
         if (processMemSetMemCpyDependence(M, MDep, BAA))
           return true;
@@ -1809,10 +1826,10 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
           }
         }
       }
-      if (auto *MDep = dyn_cast<MemCpyInst>(MI))
+      if (auto *MDep = dyn_cast<NonAtomicMemCpyInst>(MI))
         if (processMemCpyMemCpyDependence(M, MDep, BAA))
           return true;
-      if (auto *MDep = dyn_cast<MemSetInst>(MI)) {
+      if (auto *MDep = dyn_cast<NonAtomicMemSetInst>(MI)) {
         if (performMemCpyToMemSetOptzn(M, MDep, BAA)) {
           LLVM_DEBUG(dbgs() << "Converted memcpy to memset\n");
           eraseInstruction(M);
@@ -1856,7 +1873,7 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
 
 /// Transforms memmove calls to memcpy calls when the src/dst are guaranteed
 /// not to alias.
-bool MemCpyOptPass::processMemMove(MemMoveInst *M) {
+bool MemCpyOptPass::processMemMove(NonAtomicMemMoveInst *M) {
   // See if the source could be modified by this memmove potentially.
   if (isModSet(AA->getModRefInfo(M, MemoryLocation::getForSource(M))))
     return false;
@@ -1868,7 +1885,12 @@ bool MemCpyOptPass::processMemMove(MemMoveInst *M) {
   Type *ArgTys[3] = {M->getRawDest()->getType(), M->getRawSource()->getType(),
                      M->getLength()->getType()};
   M->setCalledFunction(
-      Intrinsic::getDeclaration(M->getModule(), Intrinsic::memcpy, ArgTys));
+      Intrinsic::getDeclaration(
+          M->getModule(),
+          M->getIntrinsicID() == Intrinsic::gcmemmove
+              ? Intrinsic::gcmemcpy
+              : Intrinsic::memcpy,
+          ArgTys));
 
   // For MemorySSA nothing really changes (except that memcpy may imply stricter
   // aliasing guarantees).
@@ -1888,12 +1910,12 @@ bool MemCpyOptPass::processByValArgument(CallBase &CB, unsigned ArgNo) {
   MemoryUseOrDef *CallAccess = MSSA->getMemoryAccess(&CB);
   if (!CallAccess)
     return false;
-  MemCpyInst *MDep = nullptr;
+  NonAtomicMemCpyInst *MDep = nullptr;
   BatchAAResults BAA(*AA);
   MemoryAccess *Clobber = MSSA->getWalker()->getClobberingMemoryAccess(
       CallAccess->getDefiningAccess(), Loc, BAA);
   if (auto *MD = dyn_cast<MemoryDef>(Clobber))
-    MDep = dyn_cast_or_null<MemCpyInst>(MD->getMemoryInst());
+    MDep = dyn_cast_or_null<NonAtomicMemCpyInst>(MD->getMemoryInst());
 
   // If the byval argument isn't fed by a memcpy, ignore it.  If it is fed by
   // a memcpy, see if we can byval from the source of the memcpy instead of the
@@ -1986,12 +2008,12 @@ bool MemCpyOptPass::processImmutArgument(CallBase &CB, unsigned ArgNo) {
   if (!CallAccess)
     return false;
 
-  MemCpyInst *MDep = nullptr;
+  NonAtomicMemCpyInst *MDep = nullptr;
   BatchAAResults BAA(*AA);
   MemoryAccess *Clobber = MSSA->getWalker()->getClobberingMemoryAccess(
       CallAccess->getDefiningAccess(), Loc, BAA);
   if (auto *MD = dyn_cast<MemoryDef>(Clobber))
-    MDep = dyn_cast_or_null<MemCpyInst>(MD->getMemoryInst());
+    MDep = dyn_cast_or_null<NonAtomicMemCpyInst>(MD->getMemoryInst());
 
   // If the immut argument isn't fed by a memcpy, ignore it.  If it is fed by
   // a memcpy, check that the arg equals the memcpy dest.
@@ -2063,11 +2085,11 @@ bool MemCpyOptPass::iterateOnFunction(Function &F) {
 
       if (auto *SI = dyn_cast<StoreInst>(I))
         MadeChange |= processStore(SI, BI);
-      else if (auto *M = dyn_cast<MemSetInst>(I))
+      else if (auto *M = dyn_cast<NonAtomicMemSetInst>(I))
         RepeatInstruction = processMemSet(M, BI);
-      else if (auto *M = dyn_cast<MemCpyInst>(I))
+      else if (auto *M = dyn_cast<NonAtomicMemCpyInst>(I))
         RepeatInstruction = processMemCpy(M, BI);
-      else if (auto *M = dyn_cast<MemMoveInst>(I))
+      else if (auto *M = dyn_cast<NonAtomicMemMoveInst>(I))
         RepeatInstruction = processMemMove(M);
       else if (auto *CB = dyn_cast<CallBase>(I)) {
         for (unsigned i = 0, e = CB->arg_size(); i != e; ++i) {

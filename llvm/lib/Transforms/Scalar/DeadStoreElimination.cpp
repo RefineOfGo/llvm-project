@@ -180,6 +180,8 @@ static bool isShortenableAtTheEnd(Instruction *I) {
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
     switch (II->getIntrinsicID()) {
       default: return false;
+      case Intrinsic::gcmemset:
+      case Intrinsic::gcmemcpy:
       case Intrinsic::memset:
       case Intrinsic::memcpy:
       case Intrinsic::memcpy_element_unordered_atomic:
@@ -414,7 +416,7 @@ memoryIsNotModifiedBetween(Instruction *FirstI, Instruction *SecondI,
   BasicBlock *FirstBB = FirstI->getParent();
   BasicBlock *SecondBB = SecondI->getParent();
   MemoryLocation MemLoc;
-  if (auto *MemSet = dyn_cast<MemSetInst>(SecondI))
+  if (auto *MemSet = dyn_cast<NonAtomicMemSetInst>(SecondI))
     MemLoc = MemoryLocation::getForDest(MemSet);
   else
     MemLoc = MemoryLocation::get(SecondI);
@@ -1848,7 +1850,7 @@ struct DSEState {
   /// try folding it into a call to calloc.
   bool tryFoldIntoCalloc(MemoryDef *Def, const Value *DefUO) {
     Instruction *DefI = Def->getMemoryInst();
-    MemSetInst *MemSet = dyn_cast<MemSetInst>(DefI);
+    NonAtomicMemSetInst *MemSet = dyn_cast<NonAtomicMemSetInst>(DefI);
     if (!MemSet)
       // TODO: Could handle zero store to small allocation as well.
       return false;
@@ -1979,7 +1981,7 @@ struct DSEState {
   bool storeIsNoop(MemoryDef *Def, const Value *DefUO) {
     Instruction *DefI = Def->getMemoryInst();
     StoreInst *Store = dyn_cast<StoreInst>(DefI);
-    MemSetInst *MemSet = dyn_cast<MemSetInst>(DefI);
+    NonAtomicMemSetInst *MemSet = dyn_cast<NonAtomicMemSetInst>(DefI);
     Constant *StoredConstant = nullptr;
     if (Store)
       StoredConstant = dyn_cast<Constant>(Store->getOperand(0));
@@ -2104,7 +2106,7 @@ struct DSEState {
       auto IsRedundantStore = [&]() {
         if (DefInst->isIdenticalTo(UpperInst))
           return true;
-        if (auto *MemSetI = dyn_cast<MemSetInst>(UpperInst)) {
+        if (auto *MemSetI = dyn_cast<NonAtomicMemSetInst>(UpperInst)) {
           if (auto *SI = dyn_cast<StoreInst>(DefInst)) {
             // MemSetInst must have a write location.
             auto UpperLoc = getLocForWrite(UpperInst);

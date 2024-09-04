@@ -253,7 +253,7 @@ int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
   // If this is memset, we just need to see if the offset is valid in the size
   // of the memset..
-  if (const auto *memset_inst = dyn_cast<MemSetInst>(MI)) {
+  if (const auto *memset_inst = dyn_cast<NonAtomicMemSetInst>(MI)) {
     if (DL.isNonIntegralPointerType(LoadTy->getScalarType())) {
       auto *CI = dyn_cast<ConstantInt>(memset_inst->getValue());
       if (!CI || !CI->isZero())
@@ -266,7 +266,7 @@ int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // If we have a memcpy/memmove, the only case we can handle is if this is a
   // copy from constant memory.  In that case, we can read directly from the
   // constant memory.
-  MemTransferInst *MTI = cast<MemTransferInst>(MI);
+  NonAtomicMemTransferInst *MTI = cast<NonAtomicMemTransferInst>(MI);
 
   Constant *Src = dyn_cast<Constant>(MTI->getSource());
   if (!Src)
@@ -366,7 +366,7 @@ Value *getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 
   // We know that this method is only called when the mem transfer fully
   // provides the bits for the load.
-  if (MemSetInst *MSI = dyn_cast<MemSetInst>(SrcInst)) {
+  if (NonAtomicMemSetInst *MSI = dyn_cast<NonAtomicMemSetInst>(SrcInst)) {
     // memset(P, 'x', 1234) -> splat('x'), even if x is a variable, and
     // independently of what the offset is.
     Value *Val = MSI->getValue();
@@ -397,7 +397,7 @@ Value *getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   }
 
   // Otherwise, this is a memcpy/memmove from a constant global.
-  MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
+  NonAtomicMemTransferInst *MTI = cast<NonAtomicMemTransferInst>(SrcInst);
   Constant *Src = cast<Constant>(MTI->getSource());
   unsigned IndexSize = DL.getIndexTypeSizeInBits(Src->getType());
   return ConstantFoldLoadFromConstPtr(Src, LoadTy, APInt(IndexSize, Offset),
@@ -411,7 +411,7 @@ Constant *getConstantMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 
   // We know that this method is only called when the mem transfer fully
   // provides the bits for the load.
-  if (MemSetInst *MSI = dyn_cast<MemSetInst>(SrcInst)) {
+  if (NonAtomicMemSetInst *MSI = dyn_cast<NonAtomicMemSetInst>(SrcInst)) {
     auto *Val = dyn_cast<ConstantInt>(MSI->getValue());
     if (!Val)
       return nullptr;
@@ -421,7 +421,7 @@ Constant *getConstantMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   }
 
   // Otherwise, this is a memcpy/memmove from a constant global.
-  MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
+  NonAtomicMemTransferInst *MTI = cast<NonAtomicMemTransferInst>(SrcInst);
   Constant *Src = cast<Constant>(MTI->getSource());
   unsigned IndexSize = DL.getIndexTypeSizeInBits(Src->getType());
   return ConstantFoldLoadFromConstPtr(Src, LoadTy, APInt(IndexSize, Offset),

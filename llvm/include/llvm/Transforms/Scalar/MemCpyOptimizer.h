@@ -29,11 +29,11 @@ class DominatorTree;
 class Function;
 class Instruction;
 class LoadInst;
-class MemCpyInst;
-class MemMoveInst;
 class MemorySSA;
 class MemorySSAUpdater;
-class MemSetInst;
+class NonAtomicMemCpyInst;
+class NonAtomicMemMoveInst;
+class NonAtomicMemSetInst;
 class PostDominatorTree;
 class StoreInst;
 class TargetLibraryInfo;
@@ -64,18 +64,21 @@ private:
   bool processStore(StoreInst *SI, BasicBlock::iterator &BBI);
   bool processStoreOfLoad(StoreInst *SI, LoadInst *LI, const DataLayout &DL,
                           BasicBlock::iterator &BBI);
-  bool processMemSet(MemSetInst *SI, BasicBlock::iterator &BBI);
-  bool processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI);
-  bool processMemMove(MemMoveInst *M);
+  bool processMemSet(NonAtomicMemSetInst *SI, BasicBlock::iterator &BBI);
+  bool processMemCpy(NonAtomicMemCpyInst *M, BasicBlock::iterator &BBI);
+  bool processMemMove(NonAtomicMemMoveInst *M);
   bool performCallSlotOptzn(Instruction *cpyLoad, Instruction *cpyStore,
                             Value *cpyDst, Value *cpySrc, TypeSize cpyLen,
                             Align cpyAlign, BatchAAResults &BAA,
                             std::function<CallInst *()> GetC);
-  bool processMemCpyMemCpyDependence(MemCpyInst *M, MemCpyInst *MDep,
+  bool processMemCpyMemCpyDependence(NonAtomicMemCpyInst *M,
+                                     NonAtomicMemCpyInst *MDep,
                                      BatchAAResults &BAA);
-  bool processMemSetMemCpyDependence(MemCpyInst *MemCpy, MemSetInst *MemSet,
+  bool processMemSetMemCpyDependence(NonAtomicMemCpyInst *MemCpy,
+                                     NonAtomicMemSetInst *MemSet,
                                      BatchAAResults &BAA);
-  bool performMemCpyToMemSetOptzn(MemCpyInst *MemCpy, MemSetInst *MemSet,
+  bool performMemCpyToMemSetOptzn(NonAtomicMemCpyInst *MemCpy,
+                                  NonAtomicMemSetInst *MemSet,
                                   BatchAAResults &BAA);
   bool processByValArgument(CallBase &CB, unsigned ArgNo);
   bool processImmutArgument(CallBase &CB, unsigned ArgNo);

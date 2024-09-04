@@ -26,8 +26,8 @@ private:
 
 private:
     static void replaceStore(CallInst *ir);
-    static void replaceMemClr(CallInst *ir);
-    static void replaceMemOps(CallInst *ir, Intrinsic::ID iid);
+    static void replaceMemSet(CallInst *ir);
+    static void replaceMemXfer(CallInst *ir, Intrinsic::ID iid);
     static void replaceAtomicCAS(CallInst *ir);
     static void replaceAtomicSwap(CallInst *ir);
 };
@@ -73,9 +73,9 @@ bool ROGGCLoweringImpl::run(Function &fn) {
             if (auto *fp = ir->getCalledFunction()) {
                 switch (fp->getIntrinsicID()) {
                     case Intrinsic::gcwrite       : ok = true; replaceStore(ir); break;
-                    case Intrinsic::gcmemclr      : ok = true; replaceMemClr(ir); break;
-                    case Intrinsic::gcmemcpy      : ok = true; replaceMemOps(ir, Intrinsic::memcpy); break;
-                    case Intrinsic::gcmemmove     : ok = true; replaceMemOps(ir, Intrinsic::memmove); break;
+                    case Intrinsic::gcmemset      : ok = true; replaceMemSet(ir); break;
+                    case Intrinsic::gcmemcpy      : ok = true; replaceMemXfer(ir, Intrinsic::memcpy); break;
+                    case Intrinsic::gcmemmove     : ok = true; replaceMemXfer(ir, Intrinsic::memmove); break;
                     case Intrinsic::gcatomic_cas  : ok = true; replaceAtomicCAS(ir); break;
                     case Intrinsic::gcatomic_swap : ok = true; replaceAtomicSwap(ir); break;
                 }
@@ -162,7 +162,7 @@ void ROGGCLoweringImpl::replaceStore(CallInst *ir) {
     Attribute vlt = ir->getFnAttr("volatile");
 
     /* create a store instruction */
-    auto store = new StoreInst(
+    StoreInst *store = new StoreInst(
         val,
         mem,
         vlt.isStringAttribute() && isOptionEnabled(vlt),
@@ -182,49 +182,63 @@ void ROGGCLoweringImpl::replaceStore(CallInst *ir) {
     }
 }
 
-void ROGGCLoweringImpl::replaceMemClr(CallInst *ir) {
+void ROGGCLoweringImpl::replaceMemSet(CallInst *ir) {
     Value *mem = ir->getArgOperand(0);
-    Value *len = ir->getArgOperand(1);
-    Value *vlt = ir->getArgOperand(2);
-    Value *val = ConstantInt::get(Type::getInt8Ty(ir->getContext()), 0);
-    Value *nil = ConstantPointerNull::get(cast<PointerType>(mem->getType()));
+    Value *src = ir->getArgOperand(1);
+    Value *len = ir->getArgOperand(2);
+
+    /* check fill value */
+    if (auto *val = dyn_cast<ConstantInt>(src)) {
+        if (!val->isZero()) {
+            report_fatal_error("ROG GC requires the source of `llvm.gcmemset` to be constant zero");
+        }
+    } else {
+        report_fatal_error("ROG GC requires the source of `llvm.gcmemset` to be constant zero");
+    }
+
+    /* zero byte & null pointer */
+    Value *zero = ConstantInt::get(Type::getInt8Ty(ir->getContext()), 0);
+    Value *null = ConstantPointerNull::get(PointerType::get(ir->getContext(), 0));
 
     /* create a function call to the memset intrinsic */
-    auto *fn = CallInst::Create(
+    CallInst *call = CallInst::Create(
         Intrinsic::getDeclaration(ir->getModule(), Intrinsic::memset, { mem->getType(), len->getType() }),
-        { mem, val, len, vlt }
+        { mem, zero, len, ir->getArgOperand(3) }
     );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */
-    insertBulkBarrier(ir, mem, nil, len);
-    ReplaceInstWithInst(ir, fn);
+    insertBulkBarrier(ir, mem, null, len);
+    ReplaceInstWithInst(ir, call);
 }
 
-void ROGGCLoweringImpl::replaceMemOps(CallInst *ir, Intrinsic::ID iid) {
+void ROGGCLoweringImpl::replaceMemXfer(CallInst *ir, Intrinsic::ID iid) {
     Value *mem = ir->getArgOperand(0);
     Value *src = ir->getArgOperand(1);
     Value *len = ir->getArgOperand(2);
-    Value *vlt = ir->getArgOperand(3);
+
+    /* check intrinsic ID */
+    assert(
+        (iid == Intrinsic::memcpy || iid == Intrinsic::memmove) &&
+        "invalid MemTransfer intrinsic ID"
+    );
 
     /* create a function call to the mem{cpy,move} intrinsic */
-    auto *fn = CallInst::Create(
+    CallInst *call = CallInst::Create(
         Intrinsic::getDeclaration(ir->getModule(), iid, { mem->getType(), src->getType(), len->getType() }),
-        { mem, src, len, vlt }
+        { mem, src, len, ir->getArgOperand(3) }
     );
 
     /* insert the write barrier check with a branch weight that represents "very unlikely"
      * and call bulk barrier marker function in the new branch */
     insertBulkBarrier(ir, mem, src, len);
-    ReplaceInstWithInst(ir, fn);
+    ReplaceInstWithInst(ir, call);
 }
 
 void ROGGCLoweringImpl::replaceAtomicCAS(CallInst *ir) {
     Value *   mem = ir->getArgOperand(0);
     Value *   cmp = ir->getArgOperand(1);
     Value *   val = ir->getArgOperand(2);
-    Value *   opt = ir->getArgOperand(3);
-    Value *   vlt = ir->getArgOperand(4);
     Attribute ord = ir->getFnAttr("order");
     Attribute fao = ir->getFnAttr("failure_order");
 
@@ -247,7 +261,7 @@ void ROGGCLoweringImpl::replaceAtomicCAS(CallInst *ir) {
     }
 
     /* insert a new CAS instruction before the intrinsic */
-    auto *cas = new AtomicCmpXchgInst(
+    AtomicCmpXchgInst *cas = new AtomicCmpXchgInst(
         mem,
         cmp,
         val,
@@ -258,12 +272,12 @@ void ROGGCLoweringImpl::replaceAtomicCAS(CallInst *ir) {
     );
 
     /* mark as weak CAS if any */
-    if (cast<ConstantInt>(*opt).isOne()) {
+    if (cast<ConstantInt>(*ir->getArgOperand(3)).isOne()) {
         cas->setWeak(true);
     }
 
     /* mark as volatile CAS if any */
-    if (cast<ConstantInt>(*vlt).isOne()) {
+    if (cast<ConstantInt>(*ir->getArgOperand(4)).isOne()) {
         cas->setVolatile(true);
     }
 
@@ -276,7 +290,6 @@ void ROGGCLoweringImpl::replaceAtomicCAS(CallInst *ir) {
 void ROGGCLoweringImpl::replaceAtomicSwap(CallInst *ir) {
     Value *        mem = ir->getArgOperand(0);
     Value *        val = ir->getArgOperand(1);
-    Value *        vlt = ir->getArgOperand(2);
     Attribute      opt = ir->getFnAttr("order");
     AtomicOrdering ord = AtomicOrdering::SequentiallyConsistent;
 
@@ -288,7 +301,7 @@ void ROGGCLoweringImpl::replaceAtomicSwap(CallInst *ir) {
     }
 
     /* insert a new swap instruction before the intrinsic */
-    auto *rmw = new AtomicRMWInst(
+    AtomicRMWInst *rmw = new AtomicRMWInst(
         AtomicRMWInst::Xchg,
         mem,
         val,
@@ -298,7 +311,7 @@ void ROGGCLoweringImpl::replaceAtomicSwap(CallInst *ir) {
     );
 
     /* mark as volatile xchg if any */
-    if (cast<ConstantInt>(*vlt).isOne()) {
+    if (cast<ConstantInt>(*ir->getArgOperand(2)).isOne()) {
         rmw->setVolatile(true);
     }
 

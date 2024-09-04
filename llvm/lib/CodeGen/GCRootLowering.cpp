@@ -244,32 +244,25 @@ bool DoLowering(Function &F, GCStrategy &S) {
         MadeChange = true;
         break;
       }
-      case Intrinsic::gcmemclr:
+      case Intrinsic::gcmemset:
       case Intrinsic::gcmemcpy:
       case Intrinsic::gcmemmove: {
         // Replace a memory {clear,copy,move} barrier with a call to the intrinsic mem{set,cpy,move}.
         Value *Fn;
-        Value *Src;
-        Value *Size;
-        Value *Dest = CI->getArgOperand(0);
+        Value *Dst = CI->getArgOperand(0);
+        Value *Src = CI->getArgOperand(1);
+        Value *Size = CI->getArgOperand(2);
         Align MemAlign = Align::Of<void *>();
         IRBuilder<> IR(CI);
-        if (IID != Intrinsic::gcmemclr) {
-          Src = CI->getArgOperand(1);
-          Size = CI->getArgOperand(2);
-        } else {
-          Src = ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0);
-          Size = CI->getArgOperand(1);
-        }
         switch (IID) {
-        case Intrinsic::gcmemclr:
-          Fn = IR.CreateMemSet(Dest, Src, Size, MemAlign);
+        case Intrinsic::gcmemset:
+          Fn = IR.CreateMemSet(Dst, Src, Size, MemAlign);
           break;
         case Intrinsic::gcmemcpy:
-          Fn = IR.CreateMemCpy(Dest, MemAlign, Src, MemAlign, Size);
+          Fn = IR.CreateMemCpy(Dst, MemAlign, Src, MemAlign, Size);
           break;
         case Intrinsic::gcmemmove:
-          Fn = IR.CreateMemMove(Dest, MemAlign, Src, MemAlign, Size);
+          Fn = IR.CreateMemMove(Dst, MemAlign, Src, MemAlign, Size);
           break;
         default:
           llvm_unreachable("Impossible intrinsic ID");

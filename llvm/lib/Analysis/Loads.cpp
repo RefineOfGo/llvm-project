@@ -548,7 +548,29 @@ static Value *getAvailableLoadStore(Instruction *Inst, const Value *Ptr,
         return ConstantFoldLoadFromConst(C, AccessTy, DL);
   }
 
-  if (auto *MSI = dyn_cast<MemSetInst>(Inst)) {
+  // If this is a GC-aware store through Ptr, the value is available!
+  if (GCWriteInst *WI = dyn_cast<GCWriteInst>(Inst)) {
+    // Don't forward from llvm.gcwrite to atomic load.
+    if (AtLeastAtomic)
+      return nullptr;
+
+    Value *StorePtr = WI->getPointerOperand()->stripPointerCasts();
+    if (!AreEquivalentAddressValues(StorePtr, Ptr))
+      return nullptr;
+
+    if (IsLoadCSE)
+      *IsLoadCSE = false;
+
+    Value *Val = WI->getValueOperand();
+    if (CastInst::isBitOrNoopPointerCastable(Val->getType(), AccessTy, DL))
+      return Val;
+
+    if (DL.getTypeSizeInBits(AccessTy) == DL.getPointerSizeInBits())
+      if (auto *C = dyn_cast<Constant>(Val))
+        return ConstantFoldLoadFromConst(C, AccessTy, DL);
+  }
+
+  if (auto *MSI = dyn_cast<NonAtomicMemSetInst>(Inst)) {
     // Don't forward from (non-atomic) memset to atomic load.
     if (AtLeastAtomic)
       return nullptr;

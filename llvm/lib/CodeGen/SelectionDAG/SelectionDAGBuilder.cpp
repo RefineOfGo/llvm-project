@@ -7419,7 +7419,7 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   }
   case Intrinsic::gcread:
   case Intrinsic::gcwrite:
-  case Intrinsic::gcmemclr:
+  case Intrinsic::gcmemset:
   case Intrinsic::gcmemcpy:
   case Intrinsic::gcmemmove:
   case Intrinsic::gcatomic_cas:

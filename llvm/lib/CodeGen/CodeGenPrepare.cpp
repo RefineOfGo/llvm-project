@@ -2431,7 +2431,7 @@ bool CodeGenPrepare::optimizeCallInst(CallInst *CI, ModifyDT &ModifiedDT) {
     MaybeAlign MIDestAlign = MI->getDestAlign();
     if (!MIDestAlign || DestAlign > *MIDestAlign)
       MI->setDestAlignment(DestAlign);
-    if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(MI)) {
+    if (NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(MI)) {
       MaybeAlign MTISrcAlign = MTI->getSourceAlign();
       Align SrcAlign = getKnownAlignment(MTI->getSource(), *DL);
       if (!MTISrcAlign || SrcAlign > *MTISrcAlign)
@@ -2564,6 +2564,10 @@ static bool isIntrinsicOrLFToBeTailCalled(const TargetLibraryInfo *TLInfo,
 
   if (const auto *II = dyn_cast<IntrinsicInst>(CI))
     switch (II->getIntrinsicID()) {
+    case Intrinsic::gcmemset:
+    case Intrinsic::gcmemcpy:
+    case Intrinsic::gcmemmove:
+      llvm_unreachable("llvm.gcmem{set,cpy,move} should have been lowered already.");
     case Intrinsic::memset:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:

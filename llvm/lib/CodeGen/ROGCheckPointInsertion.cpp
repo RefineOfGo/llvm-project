@@ -99,6 +99,10 @@ void ROGCheckPointInsertionImpl::insertCheckPointForLoops(LoopInfo &li) {
         head = loop->getHeader();
         loop->getLoopLatches(back);
 
+        /* remove duplicates */
+        std::sort(back.begin(), back.end());
+        back.erase(std::unique(back.begin(), back.end()), back.end());
+
         /* split the latch if needed */
         for (auto bb : back) {
             if (bb->getUniqueSuccessor()) {

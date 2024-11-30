@@ -67,7 +67,7 @@ void ROGCheckPointInsertionImpl::insertCheckPointAt(Instruction *ir) {
                             *ir->getModule(),
                             Type::getInt32Ty(ir->getContext()),
                             false,
-                            GlobalVariable::LinkOnceODRLinkage,
+                            GlobalVariable::WeakODRLinkage,
                             ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
                             ROG_CHECKPOINT_SW
                         );

@@ -684,7 +684,6 @@ void CodeGenPassBuilder<Derived, TargetMachineT>::addIRPasses(
 
   // Run GC lowering passes for builtin collectors
   // TODO: add a pass insertion point here
-  addPass(ROGCheckPointInsertionPass());
   addPass(GCLoweringPass());
   addPass(ShadowStackGCLoweringPass());
   addPass(LowerConstantIntrinsicsPass());

@@ -3,7 +3,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
-#include "llvm/Target/ROGStackCheckOptions.h"
+#include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "ROGFunctionUtils.h"
@@ -56,13 +56,6 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     if (!ok) {
         return false;
     }
-
-    /* insert a weak symbol for stack check function */
-    rog::getOrInsertFunction(
-        &mod,
-        kROGMoreStackFn,
-        Type::getVoidTy(mod.getContext())
-    );
 
     /* only insert stack limit global for AArch64 Linux */
     if (out.getOS() != Triple::Linux || out.getArch() != Triple::aarch64) {

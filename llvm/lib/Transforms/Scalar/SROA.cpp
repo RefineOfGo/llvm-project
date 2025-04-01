@@ -1159,7 +1159,7 @@ private:
     handleLoadOrStore(ValOp->getType(), SI, Offset, Size, SI.isVolatile());
   }
 
-  void visitMemSetInst(MemSetInst &II) {
+  void visitNonAtomicMemSetInst(NonAtomicMemSetInst &II) {
     assert(II.getRawDest() == *U && "Pointer use is not the destination?");
     ConstantInt *Length = dyn_cast<ConstantInt>(II.getLength());
     if ((Length && Length->getValue() == 0) ||
@@ -3156,7 +3156,7 @@ private:
     return V;
   }
 
-  bool visitMemSetInst(MemSetInst &II) {
+  bool visitNonAtomicMemSetInst(NonAtomicMemSetInst &II) {
     LLVM_DEBUG(dbgs() << "    original: " << II << "\n");
     assert(II.getRawDest() == OldPtr);
 

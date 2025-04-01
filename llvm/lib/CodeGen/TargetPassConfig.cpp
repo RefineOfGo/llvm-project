@@ -1072,7 +1072,6 @@ bool TargetPassConfig::addISelPasses() {
   addPass(createExpandLargeDivRemPass());
   addPass(createExpandLargeFpConvertPass());
   addPass(createROGStackCheckPreparingPass());
-  addPass(&ROGCheckPointInsertionID);
   addPass(&GCLoweringID);
   addIRPasses();
   addCodeGenPrepare();

@@ -10,6 +10,7 @@
 #include "llvm/IR/ROGGC.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "ROGFunctionUtils.h"
 
@@ -111,14 +112,14 @@ void ROGGCLoweringImpl::invokeBefore(CallInst *ir, ArrayRef<Value *> args, Funct
                 CmpInst::ICMP_NE,
                 new LoadInst(
                     Type::getInt32Ty(ir->getContext()),
-                    ir->getModule()->getOrInsertGlobal(ROG_GCWB_SW, Type::getInt32Ty(ir->getContext()), [&] {
+                    ir->getModule()->getOrInsertGlobal(kROGWriteBarrierSw, Type::getInt32Ty(ir->getContext()), [&] {
                         return new GlobalVariable(
                             *ir->getModule(),
                             Type::getInt32Ty(ir->getContext()),
                             false,
                             GlobalVariable::LinkOnceODRLinkage,
                             ConstantInt::get(Type::getInt32Ty(ir->getContext()), 0),
-                            ROG_GCWB_SW
+                            kROGWriteBarrierSw
                         );
                     }),
                     "",
@@ -142,7 +143,7 @@ void ROGGCLoweringImpl::invokeBefore(CallInst *ir, ArrayRef<Value *> args, Funct
 void ROGGCLoweringImpl::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) {
     invokeBefore(ir, { mem, val }, rog::getOrInsertFunction(
         ir->getModule(),
-        ROG_GCWB_ONE,
+        kROGWriteBarrierFn,
         Type::getVoidTy(ir->getContext()),
         PointerType::getUnqual(PointerType::getUnqual(Type::getInt8Ty(ir->getContext()))),
         PointerType::getUnqual(Type::getInt8Ty(ir->getContext()))
@@ -152,7 +153,7 @@ void ROGGCLoweringImpl::insertUnitBarrier(CallInst *ir, Value *mem, Value *val) 
 void ROGGCLoweringImpl::insertBulkBarrier(CallInst *ir, Value *dest, Value *src, Value *size) {
     invokeBefore(ir, { dest, src, size }, rog::getOrInsertFunction(
         ir->getModule(),
-        ROG_GCWB_BULK,
+        kROGBulkWriteBarrierFn,
         Type::getVoidTy(ir->getContext()),
         PointerType::getUnqual(Type::getInt8Ty(ir->getContext())),
         PointerType::getUnqual(Type::getInt8Ty(ir->getContext())),

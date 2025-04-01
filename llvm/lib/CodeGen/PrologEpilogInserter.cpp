@@ -1176,7 +1176,7 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
     TFI.inlineStackProbe(MF, *SaveBlock);
 
   // The two options are mutually exclusive.
-  if (MF.shouldSplitStack() && MF.shouldGrowStackROG())
+  if (MF.shouldSplitStack() && MF.shouldEmitStackCheckROG())
     report_fatal_error("ROG Stack Growing conflicts with Segmented Stack.");
 
   // Emit additional code that is required to support segmented stacks, if
@@ -1191,10 +1191,7 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
 
-  // Emit additional code that is required to support growing stacks, if we've
-  // been asked for it.  This is like segmented stacks, but grows the entire
-  // stack rather than splitting into small chunks.
-  if (MF.shouldGrowStackROG()) {
+  if (MF.shouldEmitStackCheckROG() || MF.shouldEmitCheckPointROG()) {
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForROGPrologue(MF, *SaveBlock);
   }

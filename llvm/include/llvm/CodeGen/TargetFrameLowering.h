@@ -248,7 +248,7 @@ public:
                                         MachineBasicBlock &PrologueMBB) const {}
 
   /// Adjust the prologue to add ROG runtime specific code in the assembly
-  /// prologue to explicitly handle the stack.
+  /// prologue to explicitly handle the stack or check-points.
   virtual void adjustForROGPrologue(MachineFunction &MF,
                                     MachineBasicBlock &PrologueMBB) const {}
 

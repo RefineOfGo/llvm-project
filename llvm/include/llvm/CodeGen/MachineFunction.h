@@ -869,11 +869,14 @@ public:
     return MBBNumbering[N];
   }
 
-  /// Should we be emitting stack growing stuff for the function (ROG-specific)
-  bool shouldGrowStackROG() const;
-
   /// Should we be emitting segmented stack stuff for the function
   bool shouldSplitStack() const;
+
+  /// Should we be emitting stack-checking stuff for the function (ROG-specific)
+  bool shouldEmitStackCheckROG() const;
+
+  /// Should we be emitting preempting stuff for the function (ROG-specific)
+  bool shouldEmitCheckPointROG() const;
 
   /// getNumBlockIDs - Return the number of MBB ID's allocated.
   unsigned getNumBlockIDs() const { return (unsigned)MBBNumbering.size(); }

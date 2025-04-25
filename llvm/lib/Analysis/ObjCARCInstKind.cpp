@@ -200,9 +200,6 @@ static bool isUseOnlyIntrinsic(unsigned ID) {
   //
   // TODO: Expand this into a covered switch. There is a lot more here.
   switch (ID) {
-  case Intrinsic::gcmemset:
-  case Intrinsic::gcmemcpy:
-  case Intrinsic::gcmemmove:
   case Intrinsic::memcpy:
   case Intrinsic::memmove:
   case Intrinsic::memset:

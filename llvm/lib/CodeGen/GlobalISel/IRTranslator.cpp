@@ -1732,12 +1732,12 @@ bool IRTranslator::translateMemFunc(const CallInst &CI,
 
   ConstantInt *CopySize = nullptr;
 
-  if (auto *MMI = dyn_cast<NonAtomicMemTransferInst>(&CI)) {
+  if (auto *MMI = dyn_cast<MemTransferInst>(&CI)) {
     DstAlign = MMI->getDestAlign().valueOrOne();
     SrcAlign = MMI->getSourceAlign().valueOrOne();
     CopySize = dyn_cast<ConstantInt>(MMI->getArgOperand(2));
   } else {
-    auto *MSI = cast<NonAtomicMemSetInst>(&CI);
+    auto *MSI = cast<MemSetInst>(&CI);
     DstAlign = MSI->getDestAlign().valueOrOne();
   }
 
@@ -2380,10 +2380,7 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
     MIRBuilder.buildConstant(Reg, TypeID);
     return true;
   }
-  case Intrinsic::gcmemset:
-  case Intrinsic::gcmemcpy:
-  case Intrinsic::gcmemmove:
-    llvm_unreachable("llvm.gcmem{set,cpy,move} should have been lowered already.");
+
   case Intrinsic::objectsize:
     llvm_unreachable("llvm.objectsize.* should have been lowered already");
 

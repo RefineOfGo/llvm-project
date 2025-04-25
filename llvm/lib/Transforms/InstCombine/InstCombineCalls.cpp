@@ -167,14 +167,8 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
     if (*CopyDstAlign < Size || *CopySrcAlign < Size)
       return nullptr;
 
-  unsigned PtrSize = MI->getModule()->getDataLayout().getPointerSize();
-  assert((PtrSize == 8 || !isa<GCMemTransferInst>(MI)) &&
-         "GC aware memory transfer requires pointer size to be 8");
-
-  // Use an integer/pointer load+store unless we can find something better.
-  Type *LoadTy = Size == PtrSize && isa<GCMemTransferInst>(MI)
-      ? cast<Type>(PointerType::get(MI->getContext(), 0))
-      : cast<Type>(IntegerType::get(MI->getContext(), Size << 3));
+  // Use an integer load+store unless we can find something better.
+  IntegerType* IntType = IntegerType::get(MI->getContext(), Size<<3);
 
   // If the memcpy has metadata describing the members, see if we can get the
   // TBAA, scope and noalias tags describing our copy.
@@ -182,8 +176,7 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
 
   Value *Src = MI->getArgOperand(1);
   Value *Dest = MI->getArgOperand(0);
-  LoadInst *L = Builder.CreateLoad(LoadTy, Src);
-
+  LoadInst *L = Builder.CreateLoad(IntType, Src);
   // Alignment from the mem intrinsic will be better, so use it.
   L->setAlignment(*CopySrcAlign);
   L->setAAMetadata(AACopyMD);
@@ -195,33 +188,21 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
   if (AccessGroupMD)
     L->setMetadata(LLVMContext::MD_access_group, AccessGroupMD);
 
-  StoreInst *S;
-  Instruction *Ins;
-  bool isVolatile = false;
-
-  if (auto *MT = dyn_cast<NonAtomicMemTransferInst>(MI)) {
-    isVolatile = MT->isVolatile();
-    L->setVolatile(isVolatile);
-  }
-
-  if (auto *Ty = dyn_cast<PointerType>(LoadTy)) {
-    S = nullptr;
-    Ins = Builder.CreateGCWrite(L, ConstantPointerNull::get(Ty), Dest, isVolatile);
-  } else {
-    S = Builder.CreateStore(L, Dest);
-    // Alignment from the mem intrinsic will be better, so use it.
-    S->setVolatile(isVolatile);
-    S->setAlignment(*CopyDstAlign);
-    Ins = S;
-  }
-
-  Ins->setAAMetadata(AACopyMD);
+  StoreInst *S = Builder.CreateStore(L, Dest);
+  // Alignment from the mem intrinsic will be better, so use it.
+  S->setAlignment(*CopyDstAlign);
+  S->setAAMetadata(AACopyMD);
   if (LoopMemParallelMD)
-    Ins->setMetadata(LLVMContext::MD_mem_parallel_loop_access, LoopMemParallelMD);
+    S->setMetadata(LLVMContext::MD_mem_parallel_loop_access, LoopMemParallelMD);
   if (AccessGroupMD)
-    Ins->setMetadata(LLVMContext::MD_access_group, AccessGroupMD);
-  Ins->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
+    S->setMetadata(LLVMContext::MD_access_group, AccessGroupMD);
+  S->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
 
+  if (auto *MT = dyn_cast<MemTransferInst>(MI)) {
+    // non-atomics can be volatile
+    L->setVolatile(MT->isVolatile());
+    S->setVolatile(MT->isVolatile());
+  }
   if (isa<AtomicMemTransferInst>(MI)) {
     // atomics have to be unordered
     L->setOrdering(AtomicOrdering::Unordered);
@@ -282,28 +263,20 @@ Instruction *InstCombinerImpl::SimplifyAnyMemSet(AnyMemSetInst *MI) {
     Value *Dest = MI->getDest();
 
     // Extract the fill value and store.
-    unsigned PtrSize = MI->getModule()->getDataLayout().getPointerSize();
-    Constant *FillVal = ConstantInt::get(MI->getContext(), APInt::getSplat(Len * 8, FillC->getValue()));
-    Instruction *NewInst;
-
-    if (isa<GCMemSetInst>(*MI) && Len >= PtrSize) {
-      assert(PtrSize == 8 && "GC aware memset requires pointer size to be 8");
-      PointerType *PtrTy = PointerType::get(MI->getContext(), 0);
-      Constant *Null = ConstantPointerNull::get(PtrTy);
-      Value *Val = FillC->isZero() ? Null : Builder.CreateIntToPtr(FillVal, PtrTy);
-      NewInst = Builder.CreateGCWrite(Val, Null, Dest);
-    } else {
-      StoreInst *S = Builder.CreateStore(FillVal, Dest, MI->isVolatile());
-      NewInst = S;
-    }
-    NewInst->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
-
+    Constant *FillVal = ConstantInt::get(
+        MI->getContext(), APInt::getSplat(Len * 8, FillC->getValue()));
+    StoreInst *S = Builder.CreateStore(FillVal, Dest, MI->isVolatile());
+    S->copyMetadata(*MI, LLVMContext::MD_DIAssignID);
     auto replaceOpForAssignmentMarkers = [FillC, FillVal](auto *DbgAssign) {
       if (llvm::is_contained(DbgAssign->location_ops(), FillC))
         DbgAssign->replaceVariableLocationOp(FillC, FillVal);
     };
-    for_each(at::getAssignmentMarkers(NewInst), replaceOpForAssignmentMarkers);
-    for_each(at::getDVRAssignmentMarkers(NewInst), replaceOpForAssignmentMarkers);
+    for_each(at::getAssignmentMarkers(S), replaceOpForAssignmentMarkers);
+    for_each(at::getDVRAssignmentMarkers(S), replaceOpForAssignmentMarkers);
+
+    S->setAlignment(Alignment);
+    if (isa<AtomicMemSetInst>(MI))
+      S->setOrdering(AtomicOrdering::Unordered);
 
     // Set the size of the copy to 0, it will be deleted on the next iteration.
     MI->setLength(Constant::getNullValue(LenC->getType()));
@@ -1706,11 +1679,9 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
         if (GVSrc->isConstant()) {
           Module *M = CI.getModule();
           Intrinsic::ID MemCpyID =
-              isa<GCMemMoveInst>(MMI)
-                  ? Intrinsic::gcmemcpy
-                  : isa<AtomicMemMoveInst>(MMI)
-                      ? Intrinsic::memcpy_element_unordered_atomic
-                      : Intrinsic::memcpy;
+              isa<AtomicMemMoveInst>(MMI)
+                  ? Intrinsic::memcpy_element_unordered_atomic
+                  : Intrinsic::memcpy;
           Type *Tys[3] = { CI.getArgOperand(0)->getType(),
                            CI.getArgOperand(1)->getType(),
                            CI.getArgOperand(2)->getType() };

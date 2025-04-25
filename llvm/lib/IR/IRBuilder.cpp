@@ -225,7 +225,7 @@ CallInst *IRBuilderBase::CreateMemTransferInst(
 
   CallInst *CI = CreateIntrinsic(IntrID, Tys, Ops);
 
-  auto* MCI = cast<NonAtomicMemTransferInst>(CI);
+  auto* MCI = cast<MemTransferInst>(CI);
   if (DstAlign)
     MCI->setDestAlignment(*DstAlign);
   if (SrcAlign)

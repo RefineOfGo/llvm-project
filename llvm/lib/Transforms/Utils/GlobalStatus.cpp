@@ -158,14 +158,14 @@ static bool analyzeGlobalAux(const Value *V, GlobalStatus &GS,
             return true;
       } else if (isa<CmpInst>(I)) {
         GS.IsCompared = true;
-      } else if (const NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(I)) {
+      } else if (const MemTransferInst *MTI = dyn_cast<MemTransferInst>(I)) {
         if (MTI->isVolatile())
           return true;
         if (MTI->getArgOperand(0) == V)
           GS.StoredType = GlobalStatus::Stored;
         if (MTI->getArgOperand(1) == V)
           GS.IsLoaded = true;
-      } else if (const NonAtomicMemSetInst *MSI = dyn_cast<NonAtomicMemSetInst>(I)) {
+      } else if (const MemSetInst *MSI = dyn_cast<MemSetInst>(I)) {
         assert(MSI->getArgOperand(0) == V && "Memset only takes one pointer!");
         if (MSI->isVolatile())
           return true;

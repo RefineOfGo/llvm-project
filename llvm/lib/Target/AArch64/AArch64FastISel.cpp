@@ -3487,10 +3487,6 @@ bool AArch64FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
     updateValueMap(II, ResultReg);
     return true;
   }
-  case Intrinsic::gcmemset:
-  case Intrinsic::gcmemcpy:
-  case Intrinsic::gcmemmove:
-    llvm_unreachable("llvm.gcmem{set,cpy,move} should have been lowered already.");
   case Intrinsic::memcpy:
   case Intrinsic::memmove: {
     const auto *MTI = cast<MemTransferInst>(II);

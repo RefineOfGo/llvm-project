@@ -549,7 +549,7 @@ InferAddressSpacesImpl::collectFlatAddressExpressions(Function &F) const {
       PushPtrOperand(MI->getRawDest());
 
       // Handle 2nd operand for memcpy/memmove.
-      if (auto *MTI = dyn_cast<NonAtomicMemTransferInst>(MI))
+      if (auto *MTI = dyn_cast<MemTransferInst>(MI))
         PushPtrOperand(MTI->getRawSource());
     } else if (auto *II = dyn_cast<IntrinsicInst>(&I))
       collectRewritableIntrinsicOperands(II, PostorderStack, Visited);
@@ -1104,11 +1104,11 @@ static bool handleMemIntrinsicPtrUse(MemIntrinsic *MI, Value *OldV,
   MDNode *ScopeMD = MI->getMetadata(LLVMContext::MD_alias_scope);
   MDNode *NoAliasMD = MI->getMetadata(LLVMContext::MD_noalias);
 
-  if (auto *MSI = dyn_cast<NonAtomicMemSetInst>(MI)) {
+  if (auto *MSI = dyn_cast<MemSetInst>(MI)) {
     B.CreateMemSet(MSI->getIntrinsicID(), NewV, MSI->getValue(), MSI->getLength(),
                    MSI->getDestAlign(), false, // isVolatile
                    TBAA, ScopeMD, NoAliasMD);
-  } else if (auto *MTI = dyn_cast<NonAtomicMemTransferInst>(MI)) {
+  } else if (auto *MTI = dyn_cast<MemTransferInst>(MI)) {
     Value *Src = MTI->getRawSource();
     Value *Dest = MTI->getRawDest();
 
@@ -1125,14 +1125,14 @@ static bool handleMemIntrinsicPtrUse(MemIntrinsic *MI, Value *OldV,
                            MTI->getSourceAlign(), MTI->getLength(),
                            false, // isVolatile
                            TBAA, TBAAStruct, ScopeMD, NoAliasMD);
-    } else if (isa<NonAtomicMemCpyInst>(MTI)) {
+    } else if (isa<MemCpyInst>(MTI)) {
       MDNode *TBAAStruct = MTI->getMetadata(LLVMContext::MD_tbaa_struct);
       B.CreateMemTransferInst(MTI->getIntrinsicID(), Dest, MTI->getDestAlign(),
                               Src, MTI->getSourceAlign(), MTI->getLength(),
                               false, // isVolatile
                               TBAA, TBAAStruct, ScopeMD, NoAliasMD);
     } else {
-      assert(isa<NonAtomicMemMoveInst>(MTI));
+      assert(isa<MemMoveInst>(MTI));
       B.CreateMemTransferInst(MTI->getIntrinsicID(), Dest, MTI->getDestAlign(),
                               Src, MTI->getSourceAlign(), MTI->getLength(),
                               false, // isVolatile

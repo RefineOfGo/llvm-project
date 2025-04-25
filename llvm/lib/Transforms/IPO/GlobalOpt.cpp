@@ -227,7 +227,7 @@ CleanupPointerRootUsers(GlobalVariable *GV,
         if (I->hasOneUse())
           Dead.push_back(std::make_pair(I, SI));
       }
-    } else if (NonAtomicMemSetInst *MSI = dyn_cast<NonAtomicMemSetInst>(U)) {
+    } else if (MemSetInst *MSI = dyn_cast<MemSetInst>(U)) {
       if (isa<Constant>(MSI->getValue())) {
         Changed = true;
         MSI->eraseFromParent();
@@ -235,7 +235,7 @@ CleanupPointerRootUsers(GlobalVariable *GV,
         if (I->hasOneUse())
           Dead.push_back(std::make_pair(I, MSI));
       }
-    } else if (NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(U)) {
+    } else if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(U)) {
       GlobalVariable *MemSrc = dyn_cast<GlobalVariable>(MTI->getSource());
       if (MemSrc && MemSrc->isConstant()) {
         Changed = true;

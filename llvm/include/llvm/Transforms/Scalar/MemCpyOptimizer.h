@@ -32,9 +32,9 @@ class Instruction;
 class LoadInst;
 class MemorySSA;
 class MemorySSAUpdater;
-class NonAtomicMemCpyInst;
-class NonAtomicMemMoveInst;
-class NonAtomicMemSetInst;
+class MemCpyInst;
+class MemMoveInst;
+class MemSetInst;
 class PostDominatorTree;
 class StoreInst;
 class TargetLibraryInfo;
@@ -66,21 +66,21 @@ private:
   bool processStore(StoreInst *SI, BasicBlock::iterator &BBI);
   bool processStoreOfLoad(StoreInst *SI, LoadInst *LI, const DataLayout &DL,
                           BasicBlock::iterator &BBI);
-  bool processMemSet(NonAtomicMemSetInst *SI, BasicBlock::iterator &BBI);
-  bool processMemCpy(NonAtomicMemCpyInst *M, BasicBlock::iterator &BBI);
-  bool processMemMove(NonAtomicMemMoveInst *M, BasicBlock::iterator &BBI);
+  bool processMemSet(MemSetInst *SI, BasicBlock::iterator &BBI);
+  bool processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI);
+  bool processMemMove(MemMoveInst *M, BasicBlock::iterator &BBI);
   bool performCallSlotOptzn(Instruction *cpyLoad, Instruction *cpyStore,
                             Value *cpyDst, Value *cpySrc, TypeSize cpyLen,
                             Align cpyAlign, BatchAAResults &BAA,
                             std::function<CallInst *()> GetC);
-  bool processMemCpyMemCpyDependence(NonAtomicMemCpyInst *M,
-                                     NonAtomicMemCpyInst *MDep,
+  bool processMemCpyMemCpyDependence(MemCpyInst *M,
+                                     MemCpyInst *MDep,
                                      BatchAAResults &BAA);
-  bool processMemSetMemCpyDependence(NonAtomicMemCpyInst *MemCpy,
-                                     NonAtomicMemSetInst *MemSet,
+  bool processMemSetMemCpyDependence(MemCpyInst *MemCpy,
+                                     MemSetInst *MemSet,
                                      BatchAAResults &BAA);
-  bool performMemCpyToMemSetOptzn(NonAtomicMemCpyInst *MemCpy,
-                                  NonAtomicMemSetInst *MemSet,
+  bool performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
+                                  MemSetInst *MemSet,
                                   BatchAAResults &BAA);
   bool processByValArgument(CallBase &CB, unsigned ArgNo);
   bool processImmutArgument(CallBase &CB, unsigned ArgNo);
@@ -90,7 +90,7 @@ private:
   bool performStackMoveOptzn(Instruction *Load, Instruction *Store,
                              AllocaInst *DestAlloca, AllocaInst *SrcAlloca,
                              TypeSize Size, BatchAAResults &BAA);
-  bool isMemMoveMemSetDependency(NonAtomicMemMoveInst *M);
+  bool isMemMoveMemSetDependency(MemMoveInst *M);
 
   void eraseInstruction(Instruction *I);
   bool iterateOnFunction(Function &F);

@@ -145,7 +145,7 @@ public:
     return true;
   }
 
-  bool addMemSet(uint64_t Offset, NonAtomicMemSetInst *MSI) {
+  bool addMemSet(uint64_t Offset, MemSetInst *MSI) {
     uint64_t StoreSize = cast<ConstantInt>(MSI->getLength())->getZExtValue();
     if (!addRange(Offset, Offset + StoreSize, MSI))
       return false;
@@ -377,7 +377,7 @@ Instruction *AArch64StackTagging::collectInitializers(Instruction *StartInst,
     if (isNoModRef(AA->getModRefInfo(&*BI, AllocaLoc)))
       continue;
 
-    if (!isa<StoreInst>(BI) && !isa<NonAtomicMemSetInst>(BI)) {
+    if (!isa<StoreInst>(BI) && !isa<MemSetInst>(BI)) {
       // If the instruction is readnone, ignore it, otherwise bail out.  We
       // don't even allow readonly here because we don't want something like:
       // A[1] = 2; strlen(A); A[2] = 2; -> memcpy(A, ...); strlen(A).
@@ -400,7 +400,7 @@ Instruction *AArch64StackTagging::collectInitializers(Instruction *StartInst,
         break;
       LastInst = NextStore;
     } else {
-      NonAtomicMemSetInst *MSI = cast<NonAtomicMemSetInst>(BI);
+      MemSetInst *MSI = cast<MemSetInst>(BI);
 
       if (MSI->isVolatile() || !isa<ConstantInt>(MSI->getLength()))
         break;

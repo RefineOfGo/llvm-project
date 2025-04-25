@@ -319,10 +319,9 @@ void Lint::visitCallBase(CallBase &I) {
 
       // TODO: Check more intrinsics
 
-    case Intrinsic::gcmemcpy:
     case Intrinsic::memcpy:
     case Intrinsic::memcpy_inline: {
-      NonAtomicMemCpyInst *MCI = cast<NonAtomicMemCpyInst>(&I);
+      MemCpyInst *MCI = cast<MemCpyInst>(&I);
       visitMemoryReference(I, MemoryLocation::getForDest(MCI),
                            MCI->getDestAlign(), nullptr, MemRef::Write);
       visitMemoryReference(I, MemoryLocation::getForSource(MCI),
@@ -342,18 +341,16 @@ void Lint::visitCallBase(CallBase &I) {
             "Undefined behavior: memcpy source and destination overlap", &I);
       break;
     }
-    case Intrinsic::gcmemmove:
     case Intrinsic::memmove: {
-      NonAtomicMemMoveInst *MMI = cast<NonAtomicMemMoveInst>(&I);
+      MemMoveInst *MMI = cast<MemMoveInst>(&I);
       visitMemoryReference(I, MemoryLocation::getForDest(MMI),
                            MMI->getDestAlign(), nullptr, MemRef::Write);
       visitMemoryReference(I, MemoryLocation::getForSource(MMI),
                            MMI->getSourceAlign(), nullptr, MemRef::Read);
       break;
     }
-    case Intrinsic::gcmemset:
     case Intrinsic::memset: {
-      NonAtomicMemSetInst *MSI = cast<NonAtomicMemSetInst>(&I);
+      MemSetInst *MSI = cast<MemSetInst>(&I);
       visitMemoryReference(I, MemoryLocation::getForDest(MSI),
                            MSI->getDestAlign(), nullptr, MemRef::Write);
       break;

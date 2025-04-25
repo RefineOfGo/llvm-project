@@ -991,7 +991,6 @@ static bool isAddressUse(const TargetTransformInfo &TTI,
     // Addressing modes can also be folded into prefetches and a variety
     // of intrinsics.
     switch (II->getIntrinsicID()) {
-    case Intrinsic::gcmemset:
     case Intrinsic::memset:
     case Intrinsic::prefetch:
     case Intrinsic::masked_load:
@@ -1002,8 +1001,6 @@ static bool isAddressUse(const TargetTransformInfo &TTI,
       if (II->getArgOperand(1) == OperandVal)
         isAddress = true;
       break;
-    case Intrinsic::gcmemmove:
-    case Intrinsic::gcmemcpy:
     case Intrinsic::memmove:
     case Intrinsic::memcpy:
       if (II->getArgOperand(0) == OperandVal ||
@@ -1053,8 +1050,6 @@ static MemAccessTy getAccessType(const TargetTransformInfo &TTI,
       AccessTy.AddrSpace = II->getArgOperand(0)->getType()->getPointerAddressSpace();
       AccessTy.MemTy = OperandVal->getType();
       break;
-    case Intrinsic::gcmemmove:
-    case Intrinsic::gcmemcpy:
     case Intrinsic::memmove:
     case Intrinsic::memcpy:
       AccessTy.AddrSpace = OperandVal->getType()->getPointerAddressSpace();

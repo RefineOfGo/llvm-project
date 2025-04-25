@@ -642,7 +642,7 @@ static void AddNonNullPointersByInstruction(
     if (!Len || Len->isZero()) return;
 
     AddNonNullPointer(MI->getRawDest(), PtrSet);
-    if (NonAtomicMemTransferInst *MTI = dyn_cast<NonAtomicMemTransferInst>(MI))
+    if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(MI))
       AddNonNullPointer(MTI->getRawSource(), PtrSet);
   }
 }

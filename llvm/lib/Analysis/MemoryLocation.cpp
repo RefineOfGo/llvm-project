@@ -91,7 +91,7 @@ MemoryLocation::getOrNone(const Instruction *Inst) {
   }
 }
 
-MemoryLocation MemoryLocation::getForSource(const NonAtomicMemTransferInst *MTI) {
+MemoryLocation MemoryLocation::getForSource(const MemTransferInst *MTI) {
   return getForSource(cast<AnyMemTransferInst>(MTI));
 }
 
@@ -169,9 +169,6 @@ MemoryLocation MemoryLocation::getForArgument(const CallBase *Call,
     switch (II->getIntrinsicID()) {
     default:
       break;
-    case Intrinsic::gcmemset:
-    case Intrinsic::gcmemcpy:
-    case Intrinsic::gcmemmove:
     case Intrinsic::memset:
     case Intrinsic::memcpy:
     case Intrinsic::memcpy_inline:

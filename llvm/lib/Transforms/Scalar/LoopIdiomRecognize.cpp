@@ -201,8 +201,8 @@ private:
       BasicBlock *BB,
       bool (LoopIdiomRecognize::*Processor)(MemInst *, const SCEV *),
       const SCEV *BECount);
-  bool processLoopMemCpy(NonAtomicMemCpyInst *MCI, const SCEV *BECount);
-  bool processLoopMemSet(NonAtomicMemSetInst *MSI, const SCEV *BECount);
+  bool processLoopMemCpy(MemCpyInst *MCI, const SCEV *BECount);
+  bool processLoopMemSet(MemSetInst *MSI, const SCEV *BECount);
 
   bool processLoopStridedStore(Value *DestPtr, const SCEV *StoreSizeSCEV,
                                MaybeAlign StoreAlignment, Value *StoredVal,
@@ -576,9 +576,9 @@ bool LoopIdiomRecognize::runOnLoopBlock(
   for (auto &SI : StoreRefsForMemcpy)
     MadeChange |= processLoopStoreOfLoopLoad(SI, BECount);
 
-  MadeChange |= processLoopMemIntrinsic<NonAtomicMemCpyInst>(
+  MadeChange |= processLoopMemIntrinsic<MemCpyInst>(
       BB, &LoopIdiomRecognize::processLoopMemCpy, BECount);
-  MadeChange |= processLoopMemIntrinsic<NonAtomicMemSetInst>(
+  MadeChange |= processLoopMemIntrinsic<MemSetInst>(
       BB, &LoopIdiomRecognize::processLoopMemSet, BECount);
 
   return MadeChange;
@@ -754,7 +754,7 @@ bool LoopIdiomRecognize::processLoopMemIntrinsic(
 }
 
 /// processLoopMemCpy - See if this memcpy can be promoted to a large memcpy
-bool LoopIdiomRecognize::processLoopMemCpy(NonAtomicMemCpyInst *MCI,
+bool LoopIdiomRecognize::processLoopMemCpy(MemCpyInst *MCI,
                                            const SCEV *BECount) {
   // We can only handle non-volatile memcpys with a constant size.
   if (MCI->isVolatile() || !isa<ConstantInt>(MCI->getLength()))
@@ -823,7 +823,7 @@ bool LoopIdiomRecognize::processLoopMemCpy(NonAtomicMemCpyInst *MCI,
 }
 
 /// processLoopMemSet - See if this memset can be promoted to a large memset.
-bool LoopIdiomRecognize::processLoopMemSet(NonAtomicMemSetInst *MSI,
+bool LoopIdiomRecognize::processLoopMemSet(MemSetInst *MSI,
                                            const SCEV *BECount) {
   // We can only handle non-volatile memsets.
   if (MSI->isVolatile())
@@ -1088,10 +1088,8 @@ bool LoopIdiomRecognize::processLoopStridedStore(
     AATags = AATags.extendTo(-1);
 
   CallInst *NewCall;
-  bool IsGCMemSet = isa<GCMemSetInst>(TheStore);
-  if (SplatValue || IsGCMemSet) {
+  if (SplatValue) {
     NewCall = Builder.CreateMemSet(
-        IsGCMemSet ? Intrinsic::gcmemset : Intrinsic::memset,
         BasePtr, SplatValue, NumBytes, MaybeAlign(StoreAlignment),
         /*isVolatile=*/false, AATags.TBAA, AATags.Scope, AATags.NoAlias);
   } else {
@@ -1302,7 +1300,7 @@ bool LoopIdiomRecognize::processLoopStoreOfLoopLoad(
   SmallPtrSet<Instruction *, 2> IgnoredInsts;
   IgnoredInsts.insert(TheStore);
 
-  bool IsMemCpy = isa<NonAtomicMemCpyInst>(TheStore);
+  bool IsMemCpy = isa<MemCpyInst>(TheStore);
   const StringRef InstRemark = IsMemCpy ? "memcpy" : "load and store";
 
   bool LoopAccessStore =
@@ -1386,24 +1384,23 @@ bool LoopIdiomRecognize::processLoopStoreOfLoopLoad(
     AATags = AATags.extendTo(-1);
 
   CallInst *NewCall = nullptr;
-  bool IsGCMemCpy = isa<GCMemCpyInst>(TheStore);
   // Check whether to generate an unordered atomic memcpy:
   //  If the load or store are atomic, then they must necessarily be unordered
   //  by previous checks.
   if (!TheStore->isAtomic() && !TheLoad->isAtomic()) {
-      NewCall = Builder.CreateMemTransferInst(
-          UseMemMove
-              ? (IsGCMemCpy ? Intrinsic::gcmemmove : Intrinsic::memmove)
-              : (IsGCMemCpy ? Intrinsic::gcmemcpy : Intrinsic::memcpy),
-          StoreBasePtr, StoreAlign, LoadBasePtr, LoadAlign,
-          NumBytes, /*isVolatile=*/false, AATags.TBAA,
-          AATags.TBAAStruct, AATags.Scope, AATags.NoAlias);
+    if (UseMemMove)
+      NewCall = Builder.CreateMemMove(
+          StoreBasePtr, StoreAlign, LoadBasePtr, LoadAlign, NumBytes,
+          /*isVolatile=*/false, AATags.TBAA, AATags.Scope, AATags.NoAlias);
+    else
+      NewCall =
+          Builder.CreateMemCpy(StoreBasePtr, StoreAlign, LoadBasePtr, LoadAlign,
+                               NumBytes, /*isVolatile=*/false, AATags.TBAA,
+                               AATags.TBAAStruct, AATags.Scope, AATags.NoAlias);
   } else {
     // For now don't support unordered atomic memmove.
     if (UseMemMove)
       return Changed;
-    // Atomic GC mem-transfers are not allowed.
-    assert(!IsGCMemCpy && "Atomic GC memory transfers are not allowed.");
     // We cannot allow unaligned ops for unordered load/store, so reject
     // anything where the alignment isn't at least the element size.
     assert((StoreAlign && LoadAlign) &&

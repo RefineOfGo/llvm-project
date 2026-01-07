@@ -605,8 +605,10 @@ void X86AsmPrinter::emitMachOIFuncStubHelperBody(Module &M,
   //   push %rcx
   //   push %r8
   //   push %r9
+  //   push %r10
   //   callq foo
   //   movq %rax,lazy_pointer(%rip)
+  //   pop %r10
   //   pop %r9
   //   pop %r8
   //   pop %rcx
@@ -617,7 +619,7 @@ void X86AsmPrinter::emitMachOIFuncStubHelperBody(Module &M,
   //   jmpq *lazy_pointer(%rip)
 
   for (int Reg :
-       {X86::RAX, X86::RDI, X86::RSI, X86::RDX, X86::RCX, X86::R8, X86::R9})
+       {X86::RAX, X86::RDI, X86::RSI, X86::RDX, X86::RCX, X86::R8, X86::R9, X86::R10})
     OutStreamer->emitInstruction(MCInstBuilder(X86::PUSH64r).addReg(Reg),
                                  *Subtarget);
 

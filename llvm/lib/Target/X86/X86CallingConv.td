@@ -442,10 +442,10 @@ def RetCC_X86_64_ROG : CallingConv<[
   CCIfType<[i1],  CCPromoteToType<i8>>,
 
   // The first 8 integer return values are passed in integer registers.
-  CCIfType<[i8], CCAssignToReg<[AL, DL, CL, DIL, SIL, R8B, R9B, R10B]>>,
-  CCIfType<[i16], CCAssignToReg<[AX, DX, CX, DI, SI, R8W, R9W, R10W]>>,
-  CCIfType<[i32], CCAssignToReg<[EAX, EDX, ECX, EDI, ESI, R8D, R9D, R10D]>>,
-  CCIfType<[i64], CCAssignToReg<[RAX, RDX, RCX, RDI, RSI, R8, R9, R10]>>,
+  CCIfType<[i8], CCAssignToReg<[AL, CL, DL, SIL, DIL, R8B, R9B, R10B]>>,
+  CCIfType<[i16], CCAssignToReg<[AX, CX, DX, SI, DI, R8W, R9W, R10W]>>,
+  CCIfType<[i32], CCAssignToReg<[EAX, ECX, EDX, ESI, EDI, R8D, R9D, R10D]>>,
+  CCIfType<[i64], CCAssignToReg<[RAX, RCX, RDX, RSI, RDI, R8, R9, R10]>>,
 
   // Boolean vectors of AVX-512 are returned in SIMD registers.
   // The call from AVX to AVX-512 function should work,
@@ -779,9 +779,13 @@ def CC_X86_64_ROG : CallingConv<[
   // Pointers are always passed in full 64-bit registers.
   CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
 
+  // i128 can be either passed in two i64 registers, or on the stack, but
+  // not split across register and stack. Handle this with a custom function.
+  CCIfType<[i64], CCIfConsecutiveRegs<CCCustom<"CC_X86_64_ROG_I128">>>,
+
   // The first 8 integer arguments are passed in integer registers.
-  CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D, R10D, EAX]>>,
-  CCIfType<[i64], CCAssignToReg<[RDI, RSI, RDX, RCX, R8, R9, R10, RAX]>>,
+  CCIfType<[i32], CCAssignToReg<[EAX, ECX, EDX, ESI, EDI, R8D, R9D, R10D]>>,
+  CCIfType<[i64], CCAssignToReg<[RAX, RCX, RDX, RSI, RDI, R8, R9, R10]>>,
 
   // Boolean vectors of AVX-512 are passed in SIMD registers.
   // The call from AVX to AVX-512 function should work,

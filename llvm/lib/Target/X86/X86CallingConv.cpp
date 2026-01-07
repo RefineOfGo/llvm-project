@@ -343,9 +343,10 @@ static bool CC_X86_64_Pointer(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
 /// Special handling for i128: Either allocate the value to two consecutive
 /// i64 registers, or to the stack. Do not partially allocate in registers,
 /// and do not reserve any registers when allocating to the stack.
-static bool CC_X86_64_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
-                           CCValAssign::LocInfo &LocInfo,
-                           ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+static bool CC_X86_64_I128_Generic(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                                   CCValAssign::LocInfo &LocInfo,
+                                   ISD::ArgFlagsTy &ArgFlags, CCState &State,
+                                   ArrayRef<MCPhysReg> Regs) {
   assert(ValVT == MVT::i64 && "Should have i64 parts");
   SmallVectorImpl<CCValAssign> &PendingMembers = State.getPendingLocs();
   PendingMembers.push_back(
@@ -357,8 +358,6 @@ static bool CC_X86_64_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
   unsigned NumRegs = PendingMembers.size();
   assert(NumRegs == 2 && "Should have two parts");
 
-  static const MCPhysReg Regs[] = {X86::RDI, X86::RSI, X86::RDX,
-                                   X86::RCX, X86::R8,  X86::R9};
   ArrayRef<MCPhysReg> Allocated = State.AllocateRegBlock(Regs, NumRegs);
   if (!Allocated.empty()) {
     PendingMembers[0].convertToReg(Allocated[0]);
@@ -372,6 +371,22 @@ static bool CC_X86_64_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
   State.addLoc(PendingMembers[1]);
   PendingMembers.clear();
   return true;
+}
+
+static bool CC_X86_64_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                           CCValAssign::LocInfo &LocInfo,
+                           ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+  static const MCPhysReg Regs[] = {X86::RDI, X86::RSI, X86::RDX,
+                                   X86::RCX, X86::R8,  X86::R9};
+  return CC_X86_64_I128_Generic(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State, Regs);
+}
+
+static bool CC_X86_64_ROG_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                               CCValAssign::LocInfo &LocInfo,
+                               ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+  static const MCPhysReg Regs[] = {X86::RAX, X86::RCX, X86::RDX, X86::RSI,
+                                   X86::RDI, X86::R8, X86::R9, X86::R10};
+  return CC_X86_64_I128_Generic(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State, Regs);
 }
 
 /// Special handling for i128 and fp128: on x86-32, i128 and fp128 get legalized

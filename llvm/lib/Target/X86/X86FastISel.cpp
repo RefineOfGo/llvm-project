@@ -3194,18 +3194,29 @@ bool X86FastISel::fastLowerArguments() {
       return false;
   }
 
-  static const MCPhysReg GPR32ArgRegs[] = {
+  static const MCPhysReg GPR32ArgRegs_C[] = {
     X86::EDI, X86::ESI, X86::EDX, X86::ECX,
-    X86::R8D, X86::R9D, X86::R10D, X86::EAX
+    X86::R8D, X86::R9D
   };
-  static const MCPhysReg GPR64ArgRegs[] = {
+  static const MCPhysReg GPR64ArgRegs_C[] = {
     X86::RDI, X86::RSI, X86::RDX, X86::RCX,
-    X86::R8, X86::R9, X86::R10, X86::RAX
+    X86::R8, X86::R9
+  };
+  static const MCPhysReg GPR32ArgRegs_ROG[] = {
+    X86::EAX, X86::ECX, X86::EDX, X86::ESI,
+    X86::EDI, X86::R8D, X86::R9D, X86::R10D
+  };
+  static const MCPhysReg GPR64ArgRegs_ROG[] = {
+    X86::RAX, X86::RCX, X86::RDX, X86::RSI,
+    X86::RDI, X86::R8, X86::R9, X86::R10
   };
   static const MCPhysReg XMMArgRegs[] = {
     X86::XMM0, X86::XMM1, X86::XMM2, X86::XMM3,
     X86::XMM4, X86::XMM5, X86::XMM6, X86::XMM7
   };
+
+  const MCPhysReg *GPR32ArgRegs = CC == CallingConv::C ? GPR32ArgRegs_C : GPR32ArgRegs_ROG;
+  const MCPhysReg *GPR64ArgRegs = CC == CallingConv::C ? GPR64ArgRegs_C : GPR64ArgRegs_ROG;
 
   unsigned GPRIdx = 0;
   unsigned FPRIdx = 0;

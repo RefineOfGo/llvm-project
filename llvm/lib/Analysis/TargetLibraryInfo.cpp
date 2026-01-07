@@ -72,16 +72,6 @@ static bool isCallingConvCCompatible(CallingConv::ID CC, const Triple &TT,
   case llvm::CallingConv::C:
     return true;
 
-  case llvm::CallingConv::ROG: {
-    if (Triple(TT).isAArch64())
-      return true;
-
-    if (FuncTy->getNumParams() >= 6)
-      return false;
-
-    LLVM_FALLTHROUGH;
-  }
-
   case llvm::CallingConv::ARM_APCS:
   case llvm::CallingConv::ARM_AAPCS:
   case llvm::CallingConv::ARM_AAPCS_VFP: {

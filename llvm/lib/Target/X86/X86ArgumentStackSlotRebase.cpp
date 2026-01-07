@@ -71,9 +71,9 @@ static Register getArgBaseReg(MachineFunction &MF) {
   // We need a virtual register in case there is inline assembly
   // clobber argument base register.
   case CallingConv::C:
+  case CallingConv::ROG:
     RC = STI.is64Bit() ? &X86::GR64_ArgRefRegClass : &X86::GR32_ArgRefRegClass;
     break;
-  case CallingConv::ROG:
   case CallingConv::X86_RegCall:
     // FIXME: For regcall there is no scratch register on 32-bit target.
     // We may use a callee saved register as argument base register and

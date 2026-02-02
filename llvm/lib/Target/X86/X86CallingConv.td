@@ -457,17 +457,10 @@ def RetCC_X86_64_ROG : CallingConv<[
   CCIfType<[v32i1], CCPromoteToType<v32i8>>,
   CCIfType<[v64i1], CCPromoteToType<v64i8>>,
 
-  // Vector types are returned in XMM0 to XMM7, when they fit.
+  // 128-bit vector types are returned in XMM0 to XMM7, when they fit.
+  // Longer vectors should be returned on stack, with sret arguments.
   CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64],
-            CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
-
-  // 256-bit vectors are returned in YMM0 to YMM7, when they fit.
-  CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v8f32, v4f64],
-            CCAssignToReg<[YMM0, YMM1, YMM2, YMM3, YMM4, YMM5, YMM6, YMM7]>>,
-
-  // 512-bit vectors are returned in ZMM0 to ZMM7, when they fit.
-  CCIfType<[v64i8, v32i16, v16i32, v8i64, v32f16, v16f32, v8f64],
-            CCAssignToReg<[ZMM0, ZMM1, ZMM2, ZMM3, ZMM4, ZMM5, ZMM6, ZMM7]>>,
+           CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
 ]>;
 
 // X86-64 AnyReg return-value convention. No explicit register is specified for
@@ -797,20 +790,11 @@ def CC_X86_64_ROG : CallingConv<[
   CCIfType<[v32i1], CCPromoteToType<v32i8>>,
   CCIfType<[v64i1], CCPromoteToType<v64i8>>,
 
-  // The first 8 FP/Vector arguments are passed in XMM registers.
+  // The first 8 FP/128-bit vector arguments are passed in XMM registers.
+  // Longer vectors are passed on stack.
   CCIfType<[f16, f32, f64, f128, v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64],
            CCIfSubtarget<"hasSSE1()",
            CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>>,
-
-  // The first 8 256-bit vector arguments are passed in YMM registers.
-  CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v8f32, v4f64],
-           CCIfSubtarget<"hasAVX()",
-           CCAssignToReg<[YMM0, YMM1, YMM2, YMM3, YMM4, YMM5, YMM6, YMM7]>>>,
-
-  // The first 8 512-bit vector arguments are passed in ZMM registers.
-  CCIfType<[v64i8, v32i16, v16i32, v8i64, v32f16, v16f32, v8f64],
-           CCIfSubtarget<"hasAVX512()",
-           CCAssignToReg<[ZMM0, ZMM1, ZMM2, ZMM3, ZMM4, ZMM5, ZMM6, ZMM7]>>>,
 
   // Integer/FP values get stored in stack slots that are 8 bytes in size and
   // 8-byte aligned if there are no more registers to hold them.
@@ -1277,6 +1261,9 @@ def CSR_64_RT_AllRegs_AVX : CalleeSavedRegs<(add CSR_64_RT_MostRegs,
 def CSR_64_MostRegs : CalleeSavedRegs<(add RBX, RCX, RDX, RSI, RDI, R8, R9, R10,
                                            R11, R12, R13, R14, R15, RBP,
                                            (sequence "XMM%u", 0, 15))>;
+
+def CSR_ROG_ColdRegs : CalleeSavedRegs<(add CSR_64_RT_MostRegs,
+                                            (sequence "XMM%u", 0, 7))>;
 
 def CSR_32_AllRegs     : CalleeSavedRegs<(add EAX, EBX, ECX, EDX, EBP, ESI,
                                               EDI)>;

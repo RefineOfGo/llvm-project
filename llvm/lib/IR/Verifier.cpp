@@ -3136,16 +3136,19 @@ void Verifier::visitFunction(const Function &F) {
     }
 
     [[fallthrough]];
-  case CallingConv::ROG:
   case CallingConv::ROG_Cold:
+    Check(F.getReturnType()->isVoidTy(),
+          "`rog_coldcc` calling convention does not support any return values!",
+          &F);
+    [[fallthrough]];
+  case CallingConv::ROG:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::Intel_OCL_BI:
   case CallingConv::PTX_Kernel:
   case CallingConv::PTX_Device:
     Check(!F.isVarArg(),
-          "Calling convention does not support varargs or "
-          "perfect forwarding!",
+          "Calling convention does not support varargs or perfect forwarding!",
           &F);
     break;
   case CallingConv::AMDGPU_Gfx_WholeWave:

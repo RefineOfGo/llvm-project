@@ -679,7 +679,7 @@ void CodeGenPassBuilder<Derived, TargetMachineT>::addISelPasses(
   if (TM.useEmulatedTLS())
     addModulePass(LowerEmuTLSPass(), PMW);
 
-  addFunctionPass(ROGGCLoweringPass());
+  addFunctionPass(ROGGCLoweringPass(), PMW);
   addModulePass(PreISelIntrinsicLoweringPass(&TM), PMW);
   addFunctionPass(ExpandIRInstsPass(TM, getOptLevel()), PMW);
 

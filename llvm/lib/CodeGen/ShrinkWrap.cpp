@@ -83,8 +83,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/ROGRuntimeSymbols.h"
+#include "llvm/Target/TargetMachine.h"
 #include <cassert>
 #include <memory>
 
@@ -654,7 +654,7 @@ bool ShrinkWrapImpl::postShrinkWrapping(bool HasCandidate, MachineFunction &MF,
                         some cases*/
                      MLI->getLoopFor(NewSave))) {
     SmallVector<MachineBasicBlock*> ReachablePreds;
-    for (auto BB: NewSave->predecessors())
+    for (auto *BB: NewSave->predecessors())
       if (MDT->isReachableFromEntry(BB))
         ReachablePreds.push_back(BB);
     if (ReachablePreds.empty())
@@ -1036,10 +1036,8 @@ bool ShrinkWrapImpl::isShrinkWrapEnabled(const MachineFunction &MF) {
   const Function &F = MF.getFunction();
   const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
 
-  // Do not enable shrink-wrapping for functions that uses ROG GC, needs ROG stack checking or needs ROG check-points
-  if ((F.hasGC() && F.getGC() == ROG_GC_NAME) ||
-      F.hasFnAttribute(kROGStackCheckAttr) ||
-      F.hasFnAttribute(kROGCheckpointAttr)) {
+  // Do not enable shrink-wrapping for functions that uses ROG GC or needs ROG stack checking
+  if ((F.hasGC() && F.getGC() == ROG_GC_NAME) || F.hasFnAttribute(kROGStackCheckAttr)) {
     return false;
   }
 

@@ -3545,142 +3545,95 @@ void X86FrameLowering::adjustForROGPrologue(MachineFunction &MF, MachineBasicBlo
   MachineFrameInfo &MFI = MF.getFrameInfo();
   DebugLoc DL;
 
-  // Emit check-point polling at the entry of function.
-  if (MF.shouldEmitCheckPointROG()) {
-    MachineBasicBlock *yieldMBB = MF.CreateMachineBasicBlock();
-    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+  if (!MF.shouldEmitStackCheckROG() || !MFI.needsSplitStackProlog())
+    return;
 
-    for (const auto &LI : entryMBB->liveins()) {
-      yieldMBB->addLiveIn(LI);
-      checkMBB->addLiveIn(LI);
-    }
+  uint64_t StackSize = MFI.getStackSize();
+  MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
 
-    MF.push_back(yieldMBB);
-    MF.push_front(checkMBB);
+  for (const auto &LI : entryMBB->liveins()) {
+    allocMBB->addLiveIn(LI);
+    checkMBB->addLiveIn(LI);
+  }
 
-    BuildMI(checkMBB, DL, TII.get(X86::MOV64rm), X86::R11)
-      .addReg(X86::RIP)
+  MF.push_back(allocMBB);
+  MF.push_front(checkMBB);
+
+  // When the frame size is less than the red-zone we just compare the stack
+  // boundary directly to the value of the stack pointer.
+  if (StackSize >= kROGStackRedZoneSize) {
+    BuildMI(checkMBB, DL, TII.get(X86::LEA64r), X86::R11)
+      .addUse(X86::RSP)
       .addImm(1)
       .addReg(0)
-      .addExternalSymbol(kROGCheckpointSw, X86II::MO_GOTPCREL)
+      .addImm(-StackSize)
       .addReg(0);
-
-    BuildMI(checkMBB, DL, TII.get(X86::CMP32mi))
-      .addUse(X86::R11, RegState::Kill)
-      .addImm(1)
-      .addReg(0)
-      .addImm(0)
-      .addReg(0)
-      .addImm(0);
-
-    BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
-      .addMBB(yieldMBB)
-      .addImm(X86::COND_NE);
-
-    BuildMI(checkMBB, DL, TII.get(X86::JMP_1))
-      .addMBB(entryMBB);
-
-    BuildMI(yieldMBB, DL, TII.get(X86::CALL64pcrel32))
-      .addExternalSymbol(kROGCheckpointFn);
-
-    BuildMI(yieldMBB, DL, TII.get(X86::JMP_1))
-      .addMBB(entryMBB);
-
-    checkMBB->addSuccessor(yieldMBB, BranchProbability::getZero());
-    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
-    yieldMBB->addSuccessor(entryMBB, BranchProbability::getOne());
-    entryMBB = checkMBB;
   }
 
-  // Emit stack checking after check-point polling, to wrap the check-point inside stack checking.
-  if (MF.shouldEmitStackCheckROG() && MFI.needsSplitStackProlog()) {
-    uint64_t StackSize = MFI.getStackSize();
-    MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
-    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+  int64_t Offset;
+  unsigned SegReg;
 
-    for (const auto &LI : entryMBB->liveins()) {
-      allocMBB->addLiveIn(LI);
-      checkMBB->addLiveIn(LI);
+  switch (STI.getTargetTriple().getOS()) {
+    default: {
+      report_fatal_error("ROG Stack Growing not supported on this platform.");
     }
 
-    MF.push_back(allocMBB);
-    MF.push_front(checkMBB);
-
-    // When the frame size is less than the red-zone we just compare the stack
-    // boundary directly to the value of the stack pointer.
-    if (StackSize >= kROGStackRedZoneSize) {
-      BuildMI(checkMBB, DL, TII.get(X86::LEA64r), X86::R11)
-        .addUse(X86::RSP)
-        .addImm(1)
-        .addReg(0)
-        .addImm(-StackSize)
-        .addReg(0);
+    /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
+    * one of the reserved slot within `tcbhead_t` for stack limit.
+    * Also, there is a `_Static_assert` to ensure the offset was right,
+    * so we are safe here.
+    * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
+    case Triple::Linux: {
+      Offset = 0x80;
+      SegReg = X86::FS;
+      break;
     }
 
-    int64_t Offset;
-    unsigned SegReg;
-
-    switch (STI.getTargetTriple().getOS()) {
-      default: {
-        report_fatal_error("ROG Stack Growing not supported on this platform.");
-      }
-
-      /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
-      * one of the reserved slot within `tcbhead_t` for stack limit.
-      * Also, there is a `_Static_assert` to ensure the offset was right,
-      * so we are safe here.
-      * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
-      case Triple::Linux: {
-        Offset = 0x80;
-        SegReg = X86::FS;
-        break;
-      }
-
-      /* Uses %gs segment and hard-coded slot 6 for stack limit.
-      * See: https://github.com/golang/go/issues/23617 */
-      case Triple::Darwin:
-      case Triple::MacOSX: {
-        Offset = 0x30;
-        SegReg = X86::GS;
-        break;
-      }
+    /* Uses %gs segment and hard-coded slot 6 for stack limit.
+    * See: https://github.com/golang/go/issues/23617 */
+    case Triple::Darwin:
+    case Triple::MacOSX: {
+      Offset = 0x30;
+      SegReg = X86::GS;
+      break;
     }
+  }
 
-    BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
-      .addUse(StackSize < kROGStackRedZoneSize ? X86::RSP : X86::R11)
-      .addReg(0)
+  BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
+    .addUse(StackSize < kROGStackRedZoneSize ? X86::RSP : X86::R11)
+    .addReg(0)
+    .addImm(1)
+    .addReg(0)
+    .addImm(Offset)
+    .addReg(SegReg);
+
+  BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
+    .addMBB(allocMBB)
+    .addImm(X86::COND_BE);
+
+  if (StackSize < kROGStackRedZoneSize) {
+    BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::R11)
+      .addUse(X86::RSP)
       .addImm(1)
       .addReg(0)
-      .addImm(Offset)
-      .addReg(SegReg);
-
-    BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
-      .addMBB(allocMBB)
-      .addImm(X86::COND_BE);
-
-    if (StackSize < kROGStackRedZoneSize) {
-      BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::R11)
-        .addUse(X86::RSP)
-        .addImm(1)
-        .addReg(0)
-        .addImm(-StackSize)
-        .addReg(0);
-    } else {
-      allocMBB->addLiveIn(X86::R11);
-      allocMBB->sortUniqueLiveIns();
-    }
-
-    BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
-      .addUse(X86::R11, RegState::ImplicitKill)
-      .addExternalSymbol(kROGStackCheckFn);
-
-    BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
-      .addMBB(entryMBB);
-
-    checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
-    checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
-    allocMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+      .addImm(-StackSize)
+      .addReg(0);
+  } else {
+    allocMBB->addLiveIn(X86::R11);
+    allocMBB->sortUniqueLiveIns();
   }
+
+  BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+    .addUse(X86::R11, RegState::ImplicitKill)
+    .addExternalSymbol(kROGStackCheckFn);
+
+  BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
+    .addMBB(entryMBB);
+
+  checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+  checkMBB->addSuccessor(entryMBB, BranchProbability::getOne());
+  allocMBB->addSuccessor(entryMBB, BranchProbability::getOne());
 
 #ifdef EXPENSIVE_CHECKS
   MF.verify();

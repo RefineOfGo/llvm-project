@@ -334,10 +334,6 @@ bool MachineFunction::shouldEmitStackCheckROG() const {
   return getFunction().hasFnAttribute(kROGStackCheckAttr);
 }
 
-bool MachineFunction::shouldEmitCheckPointROG() const {
-  return getFunction().hasFnAttribute(kROGCheckpointAttr);
-}
-
 [[nodiscard]] unsigned
 MachineFunction::addFrameInst(const MCCFIInstruction &Inst) {
   FrameInstructions.push_back(Inst);

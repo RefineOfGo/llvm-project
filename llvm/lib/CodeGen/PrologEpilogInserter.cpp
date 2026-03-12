@@ -1202,10 +1202,9 @@ void PEIImpl::insertPrologEpilogCode(MachineFunction &MF) {
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
 
-  if (MF.shouldEmitStackCheckROG() || MF.shouldEmitCheckPointROG()) {
+  if (MF.shouldEmitStackCheckROG())
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForROGPrologue(MF, *SaveBlock);
-  }
 
   // Emit additional code that is required to explicitly handle the stack in
   // HiPE native code (if needed) when loaded in the Erlang/OTP runtime. The

@@ -146,6 +146,13 @@ LLVM_ABI Pass *createLowerAtomicPass();
 
 //===----------------------------------------------------------------------===//
 //
+// ROGGCWriteBarrierOpt - Simplify ROG GC write barrier calls and normalize
+// function alignment for functions using the ROG collector.
+//
+LLVM_ABI FunctionPass *createROGGCWriteBarrierOptPass();
+
+//===----------------------------------------------------------------------===//
+//
 // MergeICmps - Merge integer comparison chains into a memcmp
 //
 LLVM_ABI Pass *createMergeICmpsLegacyPass();

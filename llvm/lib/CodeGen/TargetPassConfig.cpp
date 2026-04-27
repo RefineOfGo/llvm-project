@@ -1088,7 +1088,6 @@ bool TargetPassConfig::addISelPasses() {
   // PreISelIntrinsicLowering.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createObjCARCContractPass());
-  addPass(&ROGGCLoweringID);
   addPass(createPreISelIntrinsicLoweringPass());
   addPass(createExpandIRInstsPass(getOptLevel()));
   addPass(createROGStackCheckPreparingPass());

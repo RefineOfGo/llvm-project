@@ -130,6 +130,7 @@
 #include "llvm/Transforms/Scalar/MergeICmps.h"
 #include "llvm/Transforms/Scalar/MergedLoadStoreMotion.h"
 #include "llvm/Transforms/Scalar/NewGVN.h"
+#include "llvm/Transforms/Scalar/ROGGCWriteBarrierOpt.h"
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Scalar/SROA.h"
@@ -607,6 +608,8 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
   FPM.addPass(InstCombinePass());
   invokePeepholeEPCallbacks(FPM, Level);
 
+  FPM.addPass(ROGGCWriteBarrierOptPass());
+
   FPM.addPass(CoroElidePass());
 
   invokeScalarOptimizerLateEPCallbacks(FPM, Level);
@@ -797,6 +800,8 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
   // opportunities opened up by them.
   FPM.addPass(InstCombinePass());
   invokePeepholeEPCallbacks(FPM, Level);
+
+  FPM.addPass(ROGGCWriteBarrierOptPass());
 
   // Re-consider control flow based optimizations after redundancy elimination,
   // redo DCE, etc.

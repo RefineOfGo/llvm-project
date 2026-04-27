@@ -146,6 +146,13 @@ LLVM_ABI FunctionPass *createSinkingPass();
 LLVM_ABI Pass *createLowerAtomicPass();
 
 //===----------------------------------------------------------------------===//
+//
+// ROGGCWriteBarrierOpt - Simplify ROG GC write barrier calls and normalize
+// function alignment for functions using the ROG collector.
+//
+LLVM_ABI FunctionPass *createROGGCWriteBarrierOptPass();
+
+//===----------------------------------------------------------------------===//
 //===----------------------------------------------------------------------===//
 //
 // InferAddressSpaces - Modify users of addrspacecast instructions with values

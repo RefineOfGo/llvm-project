@@ -277,6 +277,7 @@ add_lit_testsuites(LLVM ${CMAKE_CURRENT_SOURCE_DIR}
 add_subdirectory(FileCheck)
 add_subdirectory(TableGen)
 add_subdirectory(Unit)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../Rog Rog)
 
 # Setup an alias for 'check-all'.
 add_custom_target(check)

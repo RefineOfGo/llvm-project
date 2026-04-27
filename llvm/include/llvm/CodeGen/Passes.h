@@ -370,14 +370,6 @@ LLVM_ABI extern char &MIRCanonicalizerID;
 /// memory operations.
 LLVM_ABI extern char &ImplicitNullChecksID;
 
-/// ROGGCLowering - Implements the custom lowering mechanism used by
-/// the ROG GC.  Only runs on functions which opt in to the ROG collector.
-LLVM_ABI FunctionPass *createROGGCLoweringPass();
-
-/// ROGGCLowering - Implements the custom lowering mechanism used by
-/// the ROG GC.
-LLVM_ABI extern char &ROGGCLoweringID;
-
 /// ROGStackCheckPreparing - Preparations for ROG Stack Check prologue.
 LLVM_ABI ModulePass *createROGStackCheckPreparingPass();
 

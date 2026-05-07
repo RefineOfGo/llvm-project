@@ -608,8 +608,6 @@ PassBuilder::buildO1FunctionSimplificationPipeline(OptimizationLevel Level,
   FPM.addPass(InstCombinePass());
   invokePeepholeEPCallbacks(FPM, Level);
 
-  FPM.addPass(ROGGCWriteBarrierOptPass());
-
   FPM.addPass(CoroElidePass());
 
   invokeScalarOptimizerLateEPCallbacks(FPM, Level);
@@ -800,8 +798,6 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
   // opportunities opened up by them.
   FPM.addPass(InstCombinePass());
   invokePeepholeEPCallbacks(FPM, Level);
-
-  FPM.addPass(ROGGCWriteBarrierOptPass());
 
   // Re-consider control flow based optimizations after redundancy elimination,
   // redo DCE, etc.
@@ -1331,6 +1327,9 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
     MPM.addPass(buildModuleInlinerPipeline(Level, Phase));
   else
     MPM.addPass(buildInlinerPipeline(Level, Phase));
+
+  // after constants propagation and inlining, try to optimize away write barriers
+  MPM.addPass(ROGGCWriteBarrierOptPass());
 
   // Remove any dead arguments exposed by cleanups, constant folding globals,
   // and argument promotion.

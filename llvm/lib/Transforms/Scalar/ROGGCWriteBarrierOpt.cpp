@@ -42,11 +42,12 @@ static FunctionCallee getOrInsertROGWriteBarrier1(Module *M, Type *ArgTy) {
 }
 
 struct ROGGCWriteBarrierOptImpl {
-  static bool run(Function &F);
+  static bool run(Module &M);
 
 private:
   static bool simplifyWriteBarrierCall(CallInst *CI);
   static bool simplifyWriteBarrierCalls(Function &F);
+  static bool optimizeFunction(Function &F);
 };
 
 } // namespace
@@ -126,7 +127,7 @@ bool ROGGCWriteBarrierOptImpl::simplifyWriteBarrierCalls(Function &F) {
   return MadeChanges;
 }
 
-bool ROGGCWriteBarrierOptImpl::run(Function &F) {
+bool ROGGCWriteBarrierOptImpl::optimizeFunction(Function &F) {
   if (!F.hasGC() || F.getGC() != ROG_GC_NAME)
     return false;
 
@@ -138,40 +139,16 @@ bool ROGGCWriteBarrierOptImpl::run(Function &F) {
   return MadeChanges;
 }
 
-PreservedAnalyses ROGGCWriteBarrierOptPass::run(Function &F,
-                                                FunctionAnalysisManager &AM) {
-  if (!ROGGCWriteBarrierOptImpl::run(F))
-    return PreservedAnalyses::all();
-  return PreservedAnalyses::none();
+bool ROGGCWriteBarrierOptImpl::run(Module &M) {
+  bool MadeChanges = false;
+  for (Function &F : M)
+    MadeChanges |= optimizeFunction(F);
+  return MadeChanges;
 }
 
-namespace {
-
-class ROGGCWriteBarrierOptLegacyPass : public FunctionPass {
-public:
-  static char ID;
-
-  ROGGCWriteBarrierOptLegacyPass() : FunctionPass(ID) {
-    initializeROGGCWriteBarrierOptLegacyPassPass(
-        *PassRegistry::getPassRegistry());
-  }
-
-  bool runOnFunction(Function &F) override {
-    FunctionAnalysisManager DummyFAM;
-    auto PA = Impl.run(F, DummyFAM);
-    return !PA.areAllPreserved();
-  }
-
-private:
-  ROGGCWriteBarrierOptPass Impl;
-};
-
-} // namespace
-
-char ROGGCWriteBarrierOptLegacyPass::ID = 0;
-INITIALIZE_PASS(ROGGCWriteBarrierOptLegacyPass, "rog-gc-write-barrier-opt",
-                "ROG GC Write Barrier Optimization", false, false)
-
-FunctionPass *llvm::createROGGCWriteBarrierOptPass() {
-  return new ROGGCWriteBarrierOptLegacyPass();
+PreservedAnalyses ROGGCWriteBarrierOptPass::run(Module &M,
+                                                ModuleAnalysisManager &AM) {
+  if (!ROGGCWriteBarrierOptImpl::run(M))
+    return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
 }

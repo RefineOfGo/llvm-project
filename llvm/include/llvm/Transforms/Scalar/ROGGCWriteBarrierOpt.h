@@ -15,7 +15,7 @@ namespace llvm {
 
 struct ROGGCWriteBarrierOptPass
     : public PassInfoMixin<ROGGCWriteBarrierOptPass> {
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 
 } // namespace llvm

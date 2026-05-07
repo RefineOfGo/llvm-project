@@ -293,7 +293,6 @@ LLVM_ABI void initializeRenameIndependentSubregsLegacyPass(PassRegistry &);
 LLVM_ABI void initializeReplaceWithVeclibLegacyPass(PassRegistry &);
 LLVM_ABI void initializeResetMachineFunctionPass(PassRegistry &);
 LLVM_ABI void initializeRuntimeLibraryInfoWrapperPass(PassRegistry &);
-LLVM_ABI void initializeROGGCWriteBarrierOptLegacyPassPass(PassRegistry &);
 LLVM_ABI void initializeROGStackCheckPreparingPass(PassRegistry &);
 LLVM_ABI void initializeSCEVAAWrapperPassPass(PassRegistry &);
 LLVM_ABI void initializeSROALegacyPassPass(PassRegistry &);

@@ -1202,9 +1202,10 @@ void PEIImpl::insertPrologEpilogCode(MachineFunction &MF) {
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
 
+  // ROG stack checks are also preemption checkpoints, so keep them at function
+  // entry even when shrink wrapping moves the normal prologue to a later block.
   if (MF.shouldEmitStackCheckROG())
-    for (MachineBasicBlock *SaveBlock : SaveBlocks)
-      TFI.adjustForROGPrologue(MF, *SaveBlock);
+    TFI.adjustForROGPrologue(MF, MF.front());
 
   // Emit additional code that is required to explicitly handle the stack in
   // HiPE native code (if needed) when loaded in the Erlang/OTP runtime. The

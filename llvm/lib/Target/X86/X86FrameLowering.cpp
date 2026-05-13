@@ -3527,10 +3527,12 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
-void X86FrameLowering::adjustForROGPrologue(MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
-  // To support shrink-wrapping we would need to insert the new blocks
-  // at the right place and update the branches to PrologueMBB.
-  assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
+void X86FrameLowering::adjustForROGPrologue(
+    MachineFunction &MF, MachineBasicBlock &PrologueMBB) const {
+  // ROG stack checks stay at function entry. Shrink wrapping may still move the
+  // normal prologue to a later block.
+  assert(&(*MF.begin()) == &PrologueMBB &&
+         "ROG stack check must be emitted at entry");
 
   if (!IsLP64 || !Is64Bit)
     report_fatal_error("ROG prologue not supported on this platform.");
@@ -4076,11 +4078,9 @@ bool X86FrameLowering::enableShrinkWrapping(const MachineFunction &MF) const {
          // The lowering of segmented stack and HiPE only support entry
          // blocks as prologue blocks: PR26107. This limitation may be
          // lifted if we fix:
-         // - adjustForStackCheckROG
          // - adjustForSegmentedStacks
          // - adjustForHiPEPrologue
          MF.getFunction().getCallingConv() != CallingConv::HiPE &&
-         !MF.shouldEmitStackCheckROG() &&
          !MF.shouldSplitStack();
 }
 

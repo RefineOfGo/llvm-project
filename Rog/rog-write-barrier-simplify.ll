@@ -47,6 +47,15 @@ entry:
   ret void
 }
 
+define void @drop_same_value(i64 %value) gc "rog" {
+; CHECK-LABEL: define void @drop_same_value(
+; CHECK-NOT: rog_write_barrier_
+; CHECK: ret void
+entry:
+  call rogcc void @rog_write_barrier_2(i64 %value, i64 %value)
+  ret void
+}
+
 define void @alloc_freeze_load_drop_both() gc "rog" {
 ; CHECK-LABEL: define void @alloc_freeze_load_drop_both(
 ; CHECK-NOT: call rogcc void @rog_write_barrier_
@@ -143,6 +152,16 @@ entry:
   %p = call noalias ptr @rog_alloc(i64 16)
   ; Dest is newly allocated with no prior writes — all old values are zero.
   call rogcc void @rog_bulk_write_barrier(ptr %p, ptr %src, i64 %size)
+  ret void
+}
+
+define void @bulk_self_copy_drops_barrier(ptr %p, i64 %size) gc "rog" {
+; CHECK-LABEL: define void @bulk_self_copy_drops_barrier(
+; CHECK-NOT: rog_bulk_write_barrier
+; CHECK-NOT: rog_src_bulk_write_barrier
+; CHECK: ret void
+entry:
+  call rogcc void @rog_bulk_write_barrier(ptr %p, ptr %p, i64 %size)
   ret void
 }
 

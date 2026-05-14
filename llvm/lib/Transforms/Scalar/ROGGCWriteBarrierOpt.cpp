@@ -9,6 +9,7 @@
 #include "llvm/Transforms/Scalar/ROGGCWriteBarrierOpt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/MemorySSAUpdater.h"
@@ -32,8 +33,9 @@ using namespace llvm;
 // runtime would scan are already ignorable. For scalar barriers it peels the
 // CodeGen materialization of the old value, uses MemorySSA plus alias analysis
 // to prove the destination slot still points into a fresh alloc-like object,
-// and folds rog_write_barrier_2(old, new) to either nothing or
-// rog_write_barrier_1(live). For bulk barriers it reuses the same
+// and folds rog_write_barrier_2(old, new) to either nothing when old and new
+// are known equal or both sides are ignorable, or rog_write_barrier_1(live).
+// For bulk barriers it reuses the same
 // fresh-and-untouched proof for the destination range and downgrades
 // rog_bulk_write_barrier(dest, src, size) to rog_src_bulk_write_barrier(src,
 // size) when only the incoming source values still need scanning. The
@@ -103,6 +105,12 @@ static bool isConstZero(const Value *V) {
   if (auto *IntVal = dyn_cast<ConstantInt>(V))
     return IntVal->isZero();
   return false;
+}
+
+static bool areKnownEqualI64(Value *LHS, Value *RHS) {
+  assert(LHS->getType()->isIntegerTy(64) && RHS->getType()->isIntegerTy(64) &&
+         "rog_write_barrier_2 arguments should be i64");
+  return LHS == RHS;
 }
 
 static bool hasAllocKind(AllocFnKind Kind, AllocFnKind Wanted) {
@@ -229,6 +237,12 @@ static bool simplifyWriteBarrier2Call(CallInst *CI, MemorySSA &MSSA,
 
   // The old value is read from a single destination pointer slot.
   const DataLayout &DL = CI->getModule()->getDataLayout();
+  if (areKnownEqualI64(CI->getArgOperand(0), CI->getArgOperand(1))) {
+    MSSAU.removeMemoryAccess(CI);
+    CI->eraseFromParent();
+    return true;
+  }
+
   LocationSize PtrSlotSize = LocationSize::precise(DL.getPointerSize());
 
   // CodeGen usually materializes the old value as freeze(load ptr); peel that
@@ -280,6 +294,14 @@ static bool simplifyBulkWriteBarrierCall(CallInst *CI, MemorySSA &MSSA,
   Value *Dest = CI->getArgOperand(0);
   Value *Src = CI->getArgOperand(1);
   Value *Size = CI->getArgOperand(2);
+
+  // A self-copy leaves every destination word unchanged, so the barrier is
+  // redundant.
+  if (Dest == Src) {
+    MSSAU.removeMemoryAccess(CI);
+    CI->eraseFromParent();
+    return true;
+  }
 
   // Model the destination conservatively as an open-ended range rooted at
   // Dest: any earlier overlapping write blocks the downgrade.

@@ -18,29 +18,44 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/ROGGC.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
 #include <cassert>
 
 using namespace llvm;
 
-// This pass reduces ROG GC barrier work by proving that some values the
-// runtime would scan are already ignorable. For scalar barriers it peels the
-// CodeGen materialization of the old value, uses MemorySSA plus alias analysis
-// to prove the destination slot still points into a fresh alloc-like object,
-// and folds rog_write_barrier_2(old, new) to either nothing when old and new
-// are known equal or both sides are ignorable, or rog_write_barrier_1(live).
-// For bulk barriers it reuses the same
-// fresh-and-untouched proof for the destination range and downgrades
-// rog_bulk_write_barrier(dest, src, size) to rog_src_bulk_write_barrier(src,
-// size) when only the incoming source values still need scanning. The
-// MemorySSA walk skips barrier helper calls as bookkeeping-only clobbers and
-// otherwise stays conservative at real writes or merged control flow.
+// This pass reduces ROG GC barrier work in three phases:
+//
+// Phase 1 — Bulk barrier decomposition: For bulk barriers with
+// !rog.bulk_write_barrier.ptrmap metadata and a constant size, decompose
+// rog_bulk_write_barrier into individual rog_write_barrier_2 calls for each
+// pointer slot when the total pointer count is at most 4. Self-copies are
+// also eliminated here.
+//
+// Phase 2 — InstCombine: Run InstCombine on functions modified by Phase 1 to
+// simplify the generated GEP + load + freeze patterns.
+//
+// Phase 3 — WB2 simplification: For scalar barriers it peels the CodeGen
+// materialization of the old value, uses MemorySSA plus alias analysis to
+// prove the destination slot still points into a fresh alloc-like object, and
+// folds rog_write_barrier_2(old, new) to either nothing when old and new are
+// known equal or both sides are ignorable, or rog_write_barrier_1(live).
+// For remaining bulk barriers (without ptrmap or with too many pointers), it
+// reuses the same fresh-and-untouched proof for the destination range and
+// downgrades rog_bulk_write_barrier(dest, src, size) to
+// rog_src_bulk_write_barrier(src, size) when only the incoming source values
+// still need scanning.
+//
+// The MemorySSA walk skips barrier helper calls as bookkeeping-only clobbers
+// and otherwise stays conservative at real writes or merged control flow.
 
 namespace {
 
@@ -75,6 +90,24 @@ static FunctionCallee getOrInsertROGSrcBulkWriteBarrier(Module *M, Type *PtrTy,
 
   Function *Fn = Function::Create(Ty, GlobalValue::ExternalWeakLinkage,
                                   "rog_src_bulk_write_barrier", *M);
+  Fn->setCallingConv(CallingConv::ROG);
+  return FunctionCallee(Ty, Fn);
+}
+
+static FunctionCallee getOrInsertROGWriteBarrier2(Module *M) {
+  GlobalValue *Callee = M->getNamedValue("rog_write_barrier_2");
+  Type *I64 = Type::getInt64Ty(M->getContext());
+  FunctionType *Ty =
+      FunctionType::get(Type::getVoidTy(M->getContext()), {I64, I64}, false);
+
+  if (Callee != nullptr) {
+    assert(cast<Function>(Callee)->getCallingConv() == CallingConv::ROG &&
+           "rog_write_barrier_2 should have ROG calling convention");
+    return FunctionCallee(Ty, Callee);
+  }
+
+  Function *Fn = Function::Create(Ty, GlobalValue::ExternalWeakLinkage,
+                                  "rog_write_barrier_2", *M);
   Fn->setCallingConv(CallingConv::ROG);
   return FunctionCallee(Ty, Fn);
 }
@@ -282,6 +315,120 @@ static bool simplifyWriteBarrier2Call(CallInst *CI, MemorySSA &MSSA,
   return true;
 }
 
+/// When a rog_bulk_write_barrier call has !rog.bulk_write_barrier.ptrmap
+/// metadata and a constant size, decompose it into individual
+/// rog_write_barrier_2 calls for each pointer slot identified by the ptrmap
+/// bitmap. This is only done when the total number of pointer slots across all
+/// objects is at most 4. Does not simplify the generated rog_write_barrier_2
+/// calls; that is done in a later phase after InstCombine has had a chance to
+/// simplify the IR.
+static bool decomposeBulkWriteBarrierWithPtrMap(CallInst *CI) {
+  assert(isBulkWriteBarrierCall(CI) && "expected rog_bulk_write_barrier call");
+
+  // Read ptrmap metadata.
+  unsigned PtrMapKind =
+      CI->getContext().getMDKindID("rog.bulk_write_barrier.ptrmap");
+  MDNode *MD = CI->getMetadata(PtrMapKind);
+  if (!MD)
+    return false;
+  assert(MD->getNumOperands() == 1 && "inavlid ptrmap metadata");
+  auto *StrMD = cast<MDString>(MD->getOperand(0));
+
+  StringRef Bitmap = StrMD->getString();
+  if (Bitmap.empty())
+    return false;
+
+  // Size must be a constant.
+  Value *SizeVal = CI->getArgOperand(2);
+  auto *SizeConst = dyn_cast<ConstantInt>(SizeVal);
+  if (!SizeConst)
+    return false;
+
+  uint64_t Size = SizeConst->getZExtValue();
+  uint64_t ObjectSize = 8 * Bitmap.size();
+
+  if (ObjectSize == 0 || Size % ObjectSize != 0)
+    return false;
+
+  uint64_t NumObjects = Size / ObjectSize;
+
+  // Collect pointer positions from the bitmap.
+  SmallVector<unsigned, 8> PointerPositions;
+  for (unsigned Pos = 0; Pos < Bitmap.size(); ++Pos)
+    if (Bitmap[Pos] == '1')
+      PointerPositions.push_back(Pos);
+
+  uint64_t TotalPtrs = PointerPositions.size() * NumObjects;
+  if (TotalPtrs == 0 || TotalPtrs > 4)
+    return false;
+
+  // Decompose: for each object, for each pointer slot, emit
+  // rog_write_barrier_2.
+  Value *Dest = CI->getArgOperand(0);
+  Value *Src = CI->getArgOperand(1);
+  Type *I64 = Type::getInt64Ty(CI->getContext());
+  Type *I8 = Type::getInt8Ty(CI->getContext());
+  const Align PtrAlign(8);
+
+  FunctionCallee WB2 = getOrInsertROGWriteBarrier2(CI->getModule());
+
+  IRBuilder<> Builder(CI);
+  Builder.SetCurrentDebugLocation(CI->getDebugLoc());
+
+  for (uint64_t ObjIdx = 0; ObjIdx < NumObjects; ++ObjIdx) {
+    for (unsigned Pos : PointerPositions) {
+      uint64_t Offset = ObjIdx * ObjectSize + Pos * 8;
+
+      Value *DstSlot = Builder.CreateGEP(I8, Dest, Builder.getInt64(Offset));
+      Value *SrcSlot = Builder.CreateGEP(I8, Src, Builder.getInt64(Offset));
+
+      // old = freeze(load i64, dst_slot)
+      LoadInst *OldLoad = Builder.CreateAlignedLoad(I64, DstSlot, PtrAlign);
+      Value *OldFrozen = Builder.CreateFreeze(OldLoad);
+
+      // new = load i64, src_slot
+      LoadInst *NewLoad = Builder.CreateAlignedLoad(I64, SrcSlot, PtrAlign);
+
+      // call rog_write_barrier_2(old, new)
+      CallInst *WB2Call = Builder.CreateCall(WB2, {OldFrozen, NewLoad});
+      WB2Call->setCallingConv(CallingConv::ROG);
+      WB2Call->setTailCallKind(CI->getTailCallKind());
+    }
+  }
+
+  CI->eraseFromParent();
+  return true;
+}
+
+/// Decompose bulk write barriers using ptrmap metadata and eliminate
+/// self-copies. This runs before WB2 optimization and before InstCombine so
+/// that the generated IR can be simplified by InstCombine before the WB2
+/// optimization pass processes it.
+static bool decomposeBulkWriteBarriers(Function &F) {
+  SmallVector<CallInst *, 8> BulkWorklist;
+
+  for (auto &BB : F) {
+    for (auto &I : BB) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (CI && isBulkWriteBarrierCall(CI))
+        BulkWorklist.push_back(CI);
+    }
+  }
+
+  bool MadeChanges = false;
+  for (CallInst *CI : BulkWorklist) {
+    // A self-copy leaves every destination word unchanged, so the barrier is
+    // redundant.
+    if (CI->getArgOperand(0) == CI->getArgOperand(1)) {
+      CI->eraseFromParent();
+      MadeChanges = true;
+      continue;
+    }
+    MadeChanges |= decomposeBulkWriteBarrierWithPtrMap(CI);
+  }
+  return MadeChanges;
+}
+
 /// When the destination range is still proved fresh and untouched, the pass
 /// can ignore the old destination values and downgrade to
 /// rog_src_bulk_write_barrier(src, size), which scans only the incoming source
@@ -360,24 +507,39 @@ static bool simplifyWriteBarrierCalls(Function &F, MemorySSA &MSSA,
   return MadeChanges;
 }
 
-static bool optimizeFunction(Function &F, MemorySSA &MSSA, BatchAAResults &AA) {
-  bool MadeChanges = simplifyWriteBarrierCalls(F, MSSA, AA);
-  if (F.getAlign().valueOrOne() < 16) {
-    F.setAlignment(Align(16));
-    MadeChanges = true;
-  }
-  return MadeChanges;
-}
-
 PreservedAnalyses ROGGCWriteBarrierOptPass::run(Module &M,
                                                 ModuleAnalysisManager &AM) {
   bool MadeChanges = false;
   auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
+  // Phase 1: Decompose bulk write barriers using ptrmap metadata and eliminate
+  // self-copies. This must happen before WB2 optimization so that the
+  // decomposed WB2 calls can benefit from InstCombine and then be optimized
+  // together with pre-existing WB2 calls.
+  SmallVector<Function *, 8> DecomposedFuncs;
   for (Function &F : M) {
     if (F.isDeclaration() || !F.hasGC() || F.getGC() != ROG_GC_NAME)
       continue;
+    if (F.hasOptNone())
+      continue;
+    if (decomposeBulkWriteBarriers(F)) {
+      DecomposedFuncs.push_back(&F);
+      MadeChanges = true;
+    }
+  }
 
+  // Phase 2: Run InstCombine on functions where decomposition happened, to
+  // simplify the generated GEP + load + freeze patterns before WB2
+  // optimization tries to reason about them.
+  for (Function *F : DecomposedFuncs) {
+    FAM.invalidate(*F, PreservedAnalyses::none());
+    InstCombinePass().run(*F, FAM);
+  }
+
+  // Phase 3: Simplify WB2 calls and remaining bulk barriers using MemorySSA.
+  for (Function &F : M) {
+    if (F.isDeclaration() || !F.hasGC() || F.getGC() != ROG_GC_NAME)
+      continue;
     if (F.hasOptNone())
       continue;
 
@@ -386,7 +548,11 @@ PreservedAnalyses ROGGCWriteBarrierOptPass::run(Module &M,
     AAResults &AA = FAM.getResult<AAManager>(F);
     BatchAAResults BAA(AA);
 
-    MadeChanges |= optimizeFunction(F, MSSA, BAA);
+    MadeChanges |= simplifyWriteBarrierCalls(F, MSSA, BAA);
+    if (F.getAlign().valueOrOne() < 16) {
+      F.setAlignment(Align(16));
+      MadeChanges = true;
+    }
   }
 
   return MadeChanges ? PreservedAnalyses::none() : PreservedAnalyses::all();

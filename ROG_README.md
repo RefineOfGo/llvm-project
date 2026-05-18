@@ -33,7 +33,7 @@ because it contains the pointer values being written.
 
 ## test
 
-ROG regression tests in [rog](./Rog):
+ROG regression tests in [rog](./rog):
 
 ```bash
 ninja check-ROG

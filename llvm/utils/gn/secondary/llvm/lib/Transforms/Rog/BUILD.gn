@@ -1,0 +1,16 @@
+static_library("Rog") {
+  output_name = "LLVMRogTransforms"
+  deps = [
+    "//llvm/lib/Analysis",
+    "//llvm/lib/IR",
+    "//llvm/lib/Support",
+    "//llvm/lib/Transforms/InstCombine",
+  ]
+  sources = [
+    "ROGBulkWriteBarrierDecompose.cpp",
+    "ROGBulkWriteBarrierSimplify.cpp",
+    "ROGFunctionAlignment.cpp",
+    "ROGGCWriteBarrierOpt.cpp",
+    "ROGScalarWriteBarrierSimplify.cpp",
+  ]
+}

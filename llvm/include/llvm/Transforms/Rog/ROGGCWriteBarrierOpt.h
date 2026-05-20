@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_TRANSFORMS_SCALAR_ROGGCWRITEBARRIEROPT_H
-#define LLVM_TRANSFORMS_SCALAR_ROGGCWRITEBARRIEROPT_H
+#ifndef LLVM_TRANSFORMS_ROG_ROGGCWRITEBARRIEROPT_H
+#define LLVM_TRANSFORMS_ROG_ROGGCWRITEBARRIEROPT_H
 
 #include "llvm/IR/PassManager.h"
 

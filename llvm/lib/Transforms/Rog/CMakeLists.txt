@@ -1,0 +1,22 @@
+add_llvm_component_library(LLVMRogTransforms
+  ROGBulkWriteBarrierDecompose.cpp
+  ROGBulkWriteBarrierSimplify.cpp
+  ROGGCWriteBarrierOpt.cpp
+  ROGScalarWriteBarrierSimplify.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms
+  ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/Rog
+
+  DEPENDS
+  intrinsics_gen
+
+  COMPONENT_NAME
+  Rog
+
+  LINK_COMPONENTS
+  Analysis
+  Core
+  InstCombine
+  Support
+  )

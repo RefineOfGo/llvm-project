@@ -11,6 +11,7 @@ static_library("Rog") {
     "ROGBulkWriteBarrierDecompose.cpp",
     "ROGBulkWriteBarrierSimplify.cpp",
     "ROGFunctionAlignment.cpp",
+    "ROGGCWBSwitchOpt.cpp",
     "ROGGCWriteBarrierOpt.cpp",
     "ROGScalarWriteBarrierSimplify.cpp",
   ]

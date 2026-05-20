@@ -85,6 +85,7 @@
 #include "llvm/Transforms/Instrumentation/PGOCtxProfLowering.h"
 #include "llvm/Transforms/Instrumentation/PGOForceFunctionAttrs.h"
 #include "llvm/Transforms/Instrumentation/PGOInstrumentation.h"
+#include "llvm/Transforms/Rog/ROGGCWBSwitchOpt.h"
 #include "llvm/Transforms/Rog/ROGGCWriteBarrierOpt.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/AlignmentFromAssumptions.h"
@@ -1675,6 +1676,14 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (!LTOPreLink)
     MPM.addPass(RelLookupTableConverterPass());
 
+  if (isLTOPostLink(LTOPhase)) {
+    FunctionPassManager PostROGFPM;
+    PostROGFPM.addPass(ROGGCWBSwitchOptPass());
+    PostROGFPM.addPass(JumpThreadingPass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(PostROGFPM),
+                                                  PTO.EagerlyInvalidateAnalyses));
+  }
+
   // Add devirtualization pass only when LTO is not enabled, as otherwise
   // the pass is already enabled in the LTO pipeline.
   if (PTO.DevirtualizeSpeculatively && LTOPhase == ThinOrFullLTOPhase::None) {
@@ -2066,6 +2075,10 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
     // AllocToken transforms heap allocation calls; this needs to run late after
     // other allocation call transformations (such as those in InstCombine).
+    FunctionPassManager ROGFPM;
+    ROGFPM.addPass(ROGGCWBSwitchOptPass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(ROGFPM),
+                                                  PTO.EagerlyInvalidateAnalyses));
     MPM.addPass(AllocTokenPass());
 
     invokeFullLinkTimeOptimizationLastEPCallbacks(MPM, Level);
@@ -2284,6 +2297,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
                                       .convertSwitchToArithmetic(true)
                                       .hoistCommonInsts(true)
                                       .speculateUnpredictables(true)));
+  LateFPM.addPass(ROGGCWBSwitchOptPass());
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(LateFPM)));
 
   // Drop bodies of available eternally objects to improve GlobalDCE.

@@ -44,6 +44,14 @@ PreservedAnalyses ROGGCWriteBarrierOptPass::run(Module &M,
     InstCombinePass().run(*F, FAM);
   }
 
+  // ROG Go functions guarantee memory reached from pointer-typed parameters holds
+  // defined values, making a freeze of a load from that memory redundant.
+  for (Function &F : M) {
+    if (!shouldOptimizeROGFunction(F))
+      continue;
+    MadeChanges |= rog::removeFreezesFromArgumentLoads(F);
+  }
+
   for (Function &F : M) {
     if (!shouldOptimizeROGFunction(F))
       continue;

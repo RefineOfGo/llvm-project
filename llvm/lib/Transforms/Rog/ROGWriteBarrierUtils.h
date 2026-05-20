@@ -206,6 +206,7 @@ inline bool isBulkWriteBarrierCall(const CallInst *CI) {
 }
 
 bool decomposeBulkWriteBarriers(Function &F);
+bool removeFreezesFromArgumentLoads(Function &F);
 bool simplifyBulkWriteBarrierCalls(Function &F, MemorySSA &MSSA,
                                    BatchAAResults &AA);
 bool simplifyWriteBarrier2Calls(Function &F, MemorySSA &MSSA,

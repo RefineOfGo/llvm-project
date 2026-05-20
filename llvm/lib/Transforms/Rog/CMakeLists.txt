@@ -1,4 +1,5 @@
 add_llvm_component_library(LLVMRogTransforms
+  ROGArgumentLoadFreezeOpt.cpp
   ROGBulkWriteBarrierDecompose.cpp
   ROGBulkWriteBarrierSimplify.cpp
   ROGGCWriteBarrierOpt.cpp

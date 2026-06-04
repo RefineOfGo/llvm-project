@@ -27,7 +27,7 @@ bool isLoadFromPointerArgument(const LoadInst *Load) {
 } // namespace
 
 bool removeFreezesFromArgumentLoads(Function &F) {
-  if (!F.hasFnAttribute("go func"))
+  if (!F.hasFnAttribute("go-func"))
     return false;
 
   SmallVector<FreezeInst *, 8> Freezes;

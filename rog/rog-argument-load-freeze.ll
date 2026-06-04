@@ -4,7 +4,7 @@
 
 declare void @use_i64(i64)
 
-define void @arg_load_freeze_removed(ptr %slot) "go func" gc "rog" {
+define void @arg_load_freeze_removed(ptr %slot) "go-func" gc "rog" {
 ; CHECK-LABEL: define void @arg_load_freeze_removed(
 ; CHECK: [[LOADED:%.*]] = load i64, ptr %slot, align 8
 ; CHECK-NOT: freeze
@@ -21,7 +21,7 @@ entry:
   ret void
 }
 
-define void @arg_gep_load_freeze_removed(ptr %base) "go func" gc "rog" {
+define void @arg_gep_load_freeze_removed(ptr %base) "go-func" gc "rog" {
 ; CHECK-LABEL: define void @arg_gep_load_freeze_removed(
 ; CHECK: [[SLOT:%.*]] = getelementptr i64, ptr %base, i64 1
 ; CHECK: [[LOADED:%.*]] = load i64, ptr [[SLOT]], align 8

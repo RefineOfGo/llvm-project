@@ -98,6 +98,9 @@ namespace CallingConv {
     /// Like `ROG` and `Cold` fused together.
     ROG_Cold = 51,
 
+    /// Go ABI0 stack-based calling convention used by Plan 9 assembly.
+    GoABI0 = 52,
+
     /// This is the start of the target-specific calling conventions, e.g.
     /// fastcall and thiscall on X86.
     FirstTargetCC = 64,

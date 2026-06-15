@@ -192,6 +192,7 @@ enum Kind {
   kw_cheriot_librarycallcc,
   kw_rogcc,
   kw_rog_coldcc,
+  kw_go_abi0cc,
 
   // Attributes:
   kw_attributes,

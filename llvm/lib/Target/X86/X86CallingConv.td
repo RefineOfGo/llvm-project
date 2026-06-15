@@ -816,6 +816,11 @@ def CC_X86_64_ROG : CallingConv<[
            CCAssignToStack<64, 64>>
 ]>;
 
+def CC_X86_64_GoABI0 : CallingConv<[
+  CCIfByVal<CCPassByVal<8, 8>>,
+  CCCustom<"CC_X86_64_GoABI0">
+]>;
+
 // No explicit register is specified for the AnyReg calling convention. The
 // register allocator may assign the arguments to any free register.
 //
@@ -1175,6 +1180,7 @@ def CC_X86_32 : CallingConv<[
 def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::ROG", CCDelegateTo<CC_X86_64_ROG>>,
   CCIfCC<"CallingConv::ROG_Cold", CCDelegateTo<CC_X86_64_ROG>>,
+  CCIfCC<"CallingConv::GoABI0", CCDelegateTo<CC_X86_64_GoABI0>>,
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_64_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_64_HiPE>>,
   CCIfCC<"CallingConv::AnyReg", CCDelegateTo<CC_X86_64_AnyReg>>,

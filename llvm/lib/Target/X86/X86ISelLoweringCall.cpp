@@ -2072,6 +2072,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   MachineFunction &MF = DAG.getMachineFunction();
   bool Is64Bit        = Subtarget.is64Bit();
   bool IsWin64 = Subtarget.isCallingConvWin64(CallConv);
+  bool IsGoABI0 = CallConv == CallingConv::GoABI0;
   bool ShouldGuaranteeTCO = shouldGuaranteeTCO(
       CallConv, MF.getTarget().Options.GuaranteedTailCallOpt);
   bool IsCalleePopSRet =
@@ -2094,6 +2095,46 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   MachineFunction::CallSiteInfo CSInfo;
   if (CallConv == CallingConv::X86_INTR)
     report_fatal_error("X86 interrupts may not be called directly");
+  if (IsGoABI0) {
+    if (!Is64Bit)
+      report_fatal_error("go_abi0cc is only supported on x86-64");
+    // Varargs is rejected by the IR verifier (go_abi0cc is in the no-varargs
+    // set), so no lowering-time guard is needed here.
+    isTailCall = false;
+  }
+
+  SDValue GoABI0SRetDst;
+  uint64_t GoABI0SRetSize = 0;
+  Align GoABI0SRetAlign(1);
+  if (IsGoABI0 && !Outs.empty() && Outs[0].Flags.isSRet()) {
+    GoABI0SRetDst = OutVals[0];
+    Type *SRetTy = nullptr;
+    if (CB) {
+      SRetTy = CB->getParamStructRetType(0);
+      if (!SRetTy && !CB->getType()->isVoidTy())
+        SRetTy = CB->getType();
+    }
+    if (!SRetTy)
+      report_fatal_error("go_abi0cc sret requires a concrete return type");
+
+    const DataLayout &DL = DAG.getDataLayout();
+    TypeSize StoreSize = DL.getTypeStoreSize(SRetTy);
+    if (StoreSize.isScalable())
+      report_fatal_error("go_abi0cc does not support scalable sret values");
+    GoABI0SRetSize = StoreSize.getFixedValue();
+    GoABI0SRetAlign = DL.getABITypeAlign(SRetTy);
+    if (GoABI0SRetAlign > Align(8))
+      GoABI0SRetAlign = Align(8);
+
+    // Go ABI0 returns live in the caller-allocated stack result area after the
+    // parameters. LLVM may demote aggregate returns to a hidden sret pointer,
+    // but that pointer is not a Plan9 ABI0 argument. Strip it before assigning
+    // outgoing stack slots, then copy the ABI0 result area back to the sret
+    // destination after the call.
+    Outs.erase(Outs.begin());
+    OutVals.erase(OutVals.begin());
+    IsCalleePopSRet = false;
+  }
 
   // Set type id for call site info.
   if (MF.getTarget().Options.EmitCallGraphSection && CB && CB->isIndirectCall())
@@ -2119,6 +2160,31 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // types.
   if (CallingConv::X86_VectorCall == CallConv) {
     CCInfo.AnalyzeArgumentsSecondPass(Outs, CC_X86);
+  }
+
+  SmallVector<int64_t, 8> GoABI0RetOffsets;
+  int64_t GoABI0SRetOffset = -1;
+  if (IsGoABI0) {
+    uint64_t StackSize = CCInfo.getStackSize();
+    uint64_t RetBase = alignTo(StackSize, Align(8));
+    if (RetBase != StackSize)
+      CCInfo.AllocateStack(static_cast<unsigned>(RetBase - StackSize),
+                           Align(1));
+
+    if (GoABI0SRetDst.getNode())
+      GoABI0SRetOffset =
+          CCInfo.AllocateStack(static_cast<unsigned>(GoABI0SRetSize),
+                               GoABI0SRetAlign);
+
+    for (const ISD::InputArg &In : Ins) {
+      unsigned Size = X86GoABI0StackSlotSize(In.VT);
+      Align Alignment = X86GoABI0StackSlotAlign(In.VT);
+      GoABI0RetOffsets.push_back(CCInfo.AllocateStack(Size, Alignment));
+    }
+
+    // Go ABI0 (amd64) treats RBP as the frame pointer and preserves it across
+    // calls, so it is already marked callee-saved in the GoABI0 regmask
+    // (CSR_64_NoneRegs). No caller-side RBP save/restore is required.
   }
 
   bool IsMustTail = CLI.CB && CLI.CB->isMustTailCall();
@@ -2471,6 +2537,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     }
   }
 
+  if (IsGoABI0) {
+    SDValue Zero = DAG.getConstant(0, dl, MVT::i64);
+    SmallVector<SDValue, 2> ZeroElts(2, Zero);
+    RegsToPass.push_back(std::make_pair(
+        Register(X86::XMM15), DAG.getBuildVector(MVT::v2i64, dl, ZeroElts)));
+  }
+
   // For tail calls lower the arguments to the 'real' stack slots.  Sibcalls
   // don't need this because the eligibility check rejects calls that require
   // shuffling arguments passed in memory.
@@ -2606,12 +2679,14 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }();
   assert(Mask && "Missing call preserved mask for calling convention");
 
-  if (MachineOperand::clobbersPhysReg(Mask, RegInfo->getFramePtr())) {
+  if (!IsGoABI0 &&
+      MachineOperand::clobbersPhysReg(Mask, RegInfo->getFramePtr())) {
     X86Info->setFPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))
       X86Info->setFPClobberedByInvoke(true);
   }
-  if (MachineOperand::clobbersPhysReg(Mask, RegInfo->getBaseRegister())) {
+  if (!IsGoABI0 &&
+      MachineOperand::clobbersPhysReg(Mask, RegInfo->getBaseRegister())) {
     X86Info->setBPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))
       X86Info->setBPClobberedByInvoke(true);
@@ -2721,6 +2796,54 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     if (MDNode *HeapAlloc = CLI.CB->getMetadata("heapallocsite"))
       DAG.addHeapAllocSite(Chain.getNode(), HeapAlloc);
 
+  if (IsGoABI0 && GoABI0SRetDst.getNode()) {
+    assert(GoABI0SRetOffset >= 0 && "missing Go ABI0 sret stack offset");
+    MVT PtrVT = getPointerTy(DAG.getDataLayout());
+    SDValue RetStackPtr =
+        DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(), PtrVT);
+    SDValue Addr =
+        DAG.getNode(ISD::ADD, dl, PtrVT, RetStackPtr,
+                    DAG.getIntPtrConstant(GoABI0SRetOffset, dl));
+    if (GoABI0SRetSize != 0) {
+      SDValue SizeNode = DAG.getIntPtrConstant(GoABI0SRetSize, dl);
+      Chain = DAG.getMemcpy(
+          Chain, dl, GoABI0SRetDst, Addr, SizeNode, GoABI0SRetAlign,
+          /*isVolatile*/ false, /*AlwaysInline=*/true,
+          /*CI=*/nullptr, std::nullopt, MachinePointerInfo(),
+          MachinePointerInfo::getStack(DAG.getMachineFunction(),
+                                       GoABI0SRetOffset));
+    }
+    InGlue = SDValue();
+  }
+
+  if (IsGoABI0 && !GoABI0RetOffsets.empty()) {
+    MVT PtrVT = getPointerTy(DAG.getDataLayout());
+    // Use the post-call stack pointer, not the argument-store base captured
+    // before the call. X86 may lower stack arguments as PUSHes, in which case
+    // the pre-call base points above the argument area while the ABI0 return
+    // slots are still addressed relative to the final argument base.
+    SDValue RetStackPtr =
+        DAG.getCopyFromReg(Chain, dl, RegInfo->getStackRegister(), PtrVT);
+
+    SmallVector<SDValue, 8> LoadChains;
+    for (unsigned I = 0, E = Ins.size(); I != E; ++I) {
+      MVT LoadVT = Ins[I].VT;
+      int64_t Offset = GoABI0RetOffsets[I];
+      SDValue Addr = DAG.getNode(
+          ISD::ADD, dl, PtrVT, RetStackPtr,
+          DAG.getIntPtrConstant(Offset, dl));
+      SDValue Load =
+          DAG.getLoad(LoadVT, dl, Chain, Addr,
+                      MachinePointerInfo::getStack(DAG.getMachineFunction(),
+                                                   Offset));
+      InVals.push_back(Load);
+      LoadChains.push_back(Load.getValue(1));
+    }
+
+    Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, LoadChains);
+    InGlue = SDValue();
+  }
+
   // Create the CALLSEQ_END node.
   unsigned NumBytesForCalleeToPop = 0; // Callee pops nothing.
   if (X86::isCalleePop(CallConv, Is64Bit, isVarArg,
@@ -2747,6 +2870,9 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
         break;
       }
     }
+
+  if (IsGoABI0)
+    return Chain;
 
   // Handle result values, copying them out of physregs into vregs that we
   // return.

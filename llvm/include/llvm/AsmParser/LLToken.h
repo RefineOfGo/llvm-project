@@ -193,6 +193,7 @@ enum Kind {
   kw_rogcc,
   kw_rog_coldcc,
   kw_go_abi0cc,
+  kw_go_abiinternalcc,
 
   // Attributes:
   kw_attributes,

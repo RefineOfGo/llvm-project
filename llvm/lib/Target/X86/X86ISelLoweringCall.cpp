@@ -2073,6 +2073,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   bool Is64Bit        = Subtarget.is64Bit();
   bool IsWin64 = Subtarget.isCallingConvWin64(CallConv);
   bool IsGoABI0 = CallConv == CallingConv::GoABI0;
+  bool IsGoABIInternal = CallConv == CallingConv::GoABIInternal;
   bool ShouldGuaranteeTCO = shouldGuaranteeTCO(
       CallConv, MF.getTarget().Options.GuaranteedTailCallOpt);
   bool IsCalleePopSRet =
@@ -2100,6 +2101,14 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       report_fatal_error("go_abi0cc is only supported on x86-64");
     // Varargs is rejected by the IR verifier (go_abi0cc is in the no-varargs
     // set), so no lowering-time guard is needed here.
+    isTailCall = false;
+  }
+  if (IsGoABIInternal) {
+    if (!Is64Bit)
+      report_fatal_error("go_abiinternalcc is only supported on x86-64");
+    // Varargs is rejected by the IR verifier (go_abiinternalcc is in the
+    // no-varargs set). Arguments/results are register-assigned by
+    // CC_X86_64_GoABIInternal / RetCC_X86_64_GoABIInternal.
     isTailCall = false;
   }
 
@@ -2537,7 +2546,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     }
   }
 
-  if (IsGoABI0) {
+  if (IsGoABI0 || IsGoABIInternal) {
     SDValue Zero = DAG.getConstant(0, dl, MVT::i64);
     SmallVector<SDValue, 2> ZeroElts(2, Zero);
     RegsToPass.push_back(std::make_pair(
@@ -2679,13 +2688,13 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }();
   assert(Mask && "Missing call preserved mask for calling convention");
 
-  if (!IsGoABI0 &&
+  if (!IsGoABI0 && !IsGoABIInternal &&
       MachineOperand::clobbersPhysReg(Mask, RegInfo->getFramePtr())) {
     X86Info->setFPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))
       X86Info->setFPClobberedByInvoke(true);
   }
-  if (!IsGoABI0 &&
+  if (!IsGoABI0 && !IsGoABIInternal &&
       MachineOperand::clobbersPhysReg(Mask, RegInfo->getBaseRegister())) {
     X86Info->setBPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))

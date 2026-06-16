@@ -463,6 +463,26 @@ def RetCC_X86_64_ROG : CallingConv<[
            CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>,
 ]>;
 
+// Go ABIInternal (amd64) return values: same register sequence as arguments.
+def RetCC_X86_64_GoABIInternal : CallingConv<[
+  // FP results in XMM0-XMM14.
+  CCIfType<[f16, f32, f64, f128],
+           CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+                          XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14]>>,
+
+  // Pointers returned in full 64-bit integer registers.
+  CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
+
+  CCIfType<[v1i1], CCPromoteToType<i8>>,
+  CCIfType<[i1], CCPromoteToType<i8>>,
+
+  // Integer results in the Go ABIInternal integer register sequence.
+  CCIfType<[i8],  CCAssignToReg<[AL, BL, CL, DIL, SIL, R8B, R9B, R10B, R11B]>>,
+  CCIfType<[i16], CCAssignToReg<[AX, BX, CX, DI, SI, R8W, R9W, R10W, R11W]>>,
+  CCIfType<[i32], CCAssignToReg<[EAX, EBX, ECX, EDI, ESI, R8D, R9D, R10D, R11D]>>,
+  CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11]>>
+]>;
+
 // X86-64 AnyReg return-value convention. No explicit register is specified for
 // the return-value. The register allocator is allowed and expected to choose
 // any free register.
@@ -508,6 +528,7 @@ def RetCC_X86_64 : CallingConv<[
   // ROG or ROG_Cold uses RetCC_X86_64_ROG
   CCIfCC<"CallingConv::ROG", CCDelegateTo<RetCC_X86_64_ROG>>,
   CCIfCC<"CallingConv::ROG_Cold", CCDelegateTo<RetCC_X86_64_ROG>>,
+  CCIfCC<"CallingConv::GoABIInternal", CCDelegateTo<RetCC_X86_64_GoABIInternal>>,
 
   // HiPE uses RetCC_X86_64_HiPE
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<RetCC_X86_64_HiPE>>,
@@ -819,6 +840,37 @@ def CC_X86_64_ROG : CallingConv<[
 def CC_X86_64_GoABI0 : CallingConv<[
   CCIfByVal<CCPassByVal<8, 8>>,
   CCCustom<"CC_X86_64_GoABI0">
+]>;
+
+// Go ABIInternal (amd64): register-based. Integer sequence
+// RAX,RBX,RCX,RDI,RSI,R8,R9,R10,R11 (RDX excluded — closure context); FP X0-X14.
+def CC_X86_64_GoABIInternal : CallingConv<[
+  CCIfByVal<CCPassByVal<8, 8>>,
+
+  // Promote i1/i8/i16 to i32.
+  CCIfType<[i1, i8, i16, v1i1], CCPromoteToType<i32>>,
+
+  // Pointers are passed in full 64-bit integer registers.
+  CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
+
+  // Integer arguments in the Go ABIInternal integer register sequence.
+  CCIfType<[i32], CCAssignToReg<[EAX, EBX, ECX, EDI, ESI, R8D, R9D, R10D, R11D]>>,
+  CCIfType<[i64], CCAssignToReg<[RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11]>>,
+
+  // FP/128-bit vector arguments in XMM0-XMM14.
+  CCIfType<[f16, f32, f64, f128, v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64],
+           CCIfSubtarget<"hasSSE1()",
+           CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+                          XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14]>>>,
+
+  // Overflow goes to 8-byte/8-aligned stack slots.
+  CCIfType<[i32, i64, f16, f32, f64], CCAssignToStack<8, 8>>,
+  CCIfType<[f80, f128], CCAssignToStack<0, 0>>,
+  CCIfType<[v16i8, v8i16, v4i32, v2i64, v8f16, v4f32, v2f64], CCAssignToStack<16, 16>>,
+  CCIfType<[v32i8, v16i16, v8i32, v4i64, v16f16, v8f32, v4f64],
+           CCAssignToStack<32, 32>>,
+  CCIfType<[v64i8, v32i16, v16i32, v8i64, v32f16, v16f32, v8f64],
+           CCAssignToStack<64, 64>>
 ]>;
 
 // No explicit register is specified for the AnyReg calling convention. The
@@ -1181,6 +1233,7 @@ def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::ROG", CCDelegateTo<CC_X86_64_ROG>>,
   CCIfCC<"CallingConv::ROG_Cold", CCDelegateTo<CC_X86_64_ROG>>,
   CCIfCC<"CallingConv::GoABI0", CCDelegateTo<CC_X86_64_GoABI0>>,
+  CCIfCC<"CallingConv::GoABIInternal", CCDelegateTo<CC_X86_64_GoABIInternal>>,
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_64_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_64_HiPE>>,
   CCIfCC<"CallingConv::AnyReg", CCDelegateTo<CC_X86_64_AnyReg>>,

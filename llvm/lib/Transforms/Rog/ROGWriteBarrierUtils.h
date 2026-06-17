@@ -131,67 +131,10 @@ inline bool isNoAliasAllocCall(const CallBase *CB) {
   return hasAllocKind(Kind, AllocFnKind::Alloc);
 }
 
-namespace detail {
-
-class MemTracker {
-  const CallBase *AllocCall;
-  MemorySSA &MSSA;
-  BatchAAResults &AA;
-
-public:
-  MemTracker(const CallBase *AllocCall, MemorySSA &MSSA, BatchAAResults &AA)
-      : AllocCall(AllocCall), MSSA(MSSA), AA(AA) {}
-
-  bool run(MemoryUseOrDef *MA, MemoryLocation Loc) {
-    if (!MA)
-      return false;
-    MemoryAccess *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(
-        MA->getDefiningAccess(), Loc, AA);
-    while (true) {
-      if (auto *MD = dyn_cast<MemoryDef>(Clobber)) {
-        if (MSSA.dominates(Clobber, MSSA.getMemoryAccess(AllocCall))) {
-          assert(MD->getMemoryInst() == AllocCall);
-          return true;
-        }
-        auto *CI = dyn_cast<CallInst>(MD->getMemoryInst());
-        if (CI) {
-          auto *Callee =
-              dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
-          if (Callee && (Callee->getName() == "rog_write_barrier_2" ||
-                         Callee->getName() == "rog_write_barrier_1" ||
-                         Callee->getName() == "rog_bulk_write_barrier" ||
-                         Callee->getName() == "rog_src_bulk_write_barrier")) {
-            Clobber = MSSA.getWalker()->getClobberingMemoryAccess(
-                MD->getDefiningAccess(), Loc, AA);
-            continue;
-          }
-        }
-      }
-      if (auto *MP = dyn_cast<MemoryPhi>(Clobber)) {
-        (void)MP;
-        return false;
-      }
-      return false;
-    }
-  }
-};
-
-} // namespace detail
-
-inline bool isPointerToNewlyAllocatedMemory(const Value *Ptr,
-                                            const Instruction *BeforeInst,
-                                            MemorySSA &MSSA, BatchAAResults &AA,
-                                            LocationSize LocSize) {
-  if (Ptr == nullptr)
-    return false;
-  const Value *Base = getUnderlyingObject(Ptr);
-  auto *AllocCall = dyn_cast<CallBase>(Base);
-  if (!isNoAliasAllocCall(AllocCall))
-    return false;
-  MemoryLocation Loc(Ptr, LocSize);
-  detail::MemTracker Tracker{AllocCall, MSSA, AA};
-  return Tracker.run(MSSA.getMemoryAccess(BeforeInst), Loc);
-}
+bool isPointerToNewlyAllocatedMemory(const Value *Ptr,
+                                     const Instruction *BeforeInst,
+                                     MemorySSA &MSSA, BatchAAResults &AA,
+                                     LocationSize LocSize);
 
 inline bool isWriteBarrier2Call(const CallInst *CI) {
   auto *Callee =

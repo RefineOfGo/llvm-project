@@ -14,5 +14,6 @@ static_library("Rog") {
     "ROGGCWBSwitchOpt.cpp",
     "ROGGCWriteBarrierOpt.cpp",
     "ROGScalarWriteBarrierSimplify.cpp",
+    "ROGWriteBarrierUtils.cpp",
   ]
 }

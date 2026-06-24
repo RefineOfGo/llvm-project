@@ -10,11 +10,13 @@
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -22,7 +24,9 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCSymbolELF.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -522,8 +526,45 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
   uint64_t FrameSize = HasDynamicFrameSize ? UINT64_MAX : MFI.getStackSize();
 
   auto [CurrentIt, Inserted] = FnInfos.try_emplace(AP.CurrentFnSym, FrameSize);
-  if (!Inserted)
+  if (!Inserted) {
     CurrentIt->second.RecordCount++;
+    return;
+  }
+
+  // ROG precise GC: record the callee-saved-register save area as a [Lo, Hi)
+  // byte range relative to the frame pointer. The runtime scans it
+  // conservatively to recover GC pointers that outer frames hold in
+  // callee-saved registers (physically spilled here by this frame). Taken from
+  // MachineFrameInfo, so it is independent of where shrink-wrapping places the
+  // actual save instructions.
+  const TargetFrameLowering *TFI = AP.MF->getSubtarget().getFrameLowering();
+  Register FPReg = RegInfo->getFrameRegister(*AP.MF);
+  int32_t Lo = 0, Hi = 0;
+  bool Any = false;
+  for (const CalleeSavedInfo &CSI : MFI.getCalleeSavedInfo()) {
+    if (CSI.isSpilledToReg())
+      continue;
+    int FI = CSI.getFrameIdx();
+    Register FrameReg;
+    StackOffset Off = TFI->getFrameIndexReference(*AP.MF, FI, FrameReg);
+    // Only frame-pointer-relative slots can be located by the runtime (which
+    // keys off the saved RBP). With ROG forcing frame pointers this holds for
+    // the callee-saved slots; skip anything else defensively.
+    if (FrameReg != FPReg)
+      continue;
+    int32_t O = static_cast<int32_t>(Off.getFixed());
+    int32_t Sz = static_cast<int32_t>(MFI.getObjectSize(FI));
+    if (!Any) {
+      Lo = O;
+      Hi = O + Sz;
+      Any = true;
+    } else {
+      Lo = std::min(Lo, O);
+      Hi = std::max(Hi, O + Sz);
+    }
+  }
+  CurrentIt->second.CSRLo = Lo;
+  CurrentIt->second.CSRHi = Hi;
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
@@ -663,80 +704,83 @@ void StackMaps::emitConstantPoolEntries(MCStreamer &OS) {
 ///   0x3, Indirect, [Reg + Offset]      (spilled value)
 ///   0x4, Constant, Offset              (small constant)
 ///   0x5, ConstIndex, Constants[Offset] (large constant)
+void StackMaps::emitCallsiteEntry(MCStreamer &OS, const CallsiteInfo &CSI) {
+  const LocationVec &CSLocs = CSI.Locations;
+  const LiveOutVec &LiveOuts = CSI.LiveOuts;
+
+  // Verify stack map entry. It's better to communicate a problem to the
+  // runtime than crash in case of in-process compilation. Currently, we do
+  // simple overflow checks, but we may eventually communicate other
+  // compilation errors this way.
+  if (CSLocs.size() > UINT16_MAX || LiveOuts.size() > UINT16_MAX) {
+    OS.AddComment("Invalid CallSite");
+    OS.emitIntValue(UINT64_MAX, 8); // Invalid ID.
+    OS.AddComment("  Offset");
+    OS.emitValue(CSI.CSOffsetExpr, 4);
+    OS.emitInt16(0); // Reserved.
+    OS.AddComment("  Num Locations");
+    OS.emitInt16(0); // 0 locations.
+    OS.emitInt16(0); // padding.
+    OS.AddComment("  Num Live-out Registers");
+    OS.emitInt16(0); // 0 live-out registers.
+    OS.emitInt32(0); // padding.
+    return;
+  }
+
+  OS.AddComment("PatchPoint #" + Twine(CSI.ID));
+  OS.emitIntValue(CSI.ID, 8);
+  OS.AddComment("  Offset");
+  OS.emitValue(CSI.CSOffsetExpr, 4);
+
+  // Reserved for flags.
+  OS.emitInt16(0);
+  OS.AddComment("  Num Locations");
+  OS.emitInt16(CSLocs.size());
+
+  for (const auto &Loc : CSLocs) {
+    switch (Loc.Type) {
+      case Location::Unprocessed   : OS.AddComment("    Location: Unprocessed"  ); break;
+      case Location::Register      : OS.AddComment("    Location: Register"     ); break;
+      case Location::Direct        : OS.AddComment("    Location: Direct"       ); break;
+      case Location::Indirect      : OS.AddComment("    Location: Indirect"     ); break;
+      case Location::Constant      : OS.AddComment("    Location: Constant"     ); break;
+      case Location::ConstantIndex : OS.AddComment("    Location: ConstantIndex"); break;
+    }
+    OS.emitIntValue(Loc.Type, 1);
+    OS.emitIntValue(0, 1);  // Reserved
+    OS.AddComment("    Size");
+    OS.emitInt16(Loc.Size);
+    OS.AddComment("    Register");
+    OS.emitInt16(Loc.Reg);
+    OS.emitInt16(0); // Reserved
+    OS.AddComment("    Offset");
+    OS.emitInt32(Loc.Offset);
+  }
+
+  // Emit alignment to 8 byte.
+  OS.emitValueToAlignment(Align(8));
+
+  // Num live-out registers and padding to align to 4 byte.
+  OS.emitInt16(0);
+  OS.AddComment("  Num LiveOuts");
+  OS.emitInt16(LiveOuts.size());
+
+  for (const auto &LO : LiveOuts) {
+    OS.AddComment("    DWARF Reg Num");
+    OS.emitInt16(LO.DwarfRegNum);
+    OS.emitIntValue(0, 1);
+    OS.AddComment("    Size");
+    OS.emitIntValue(LO.Size, 1);
+  }
+  // Emit alignment to 8 byte.
+  OS.emitValueToAlignment(Align(8));
+}
+
 void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
   LLVM_DEBUG(print(dbgs()));
   // Callsite entries.
-  for (const auto &CSI : CSInfos) {
-    const LocationVec &CSLocs = CSI.Locations;
-    const LiveOutVec &LiveOuts = CSI.LiveOuts;
-
-    // Verify stack map entry. It's better to communicate a problem to the
-    // runtime than crash in case of in-process compilation. Currently, we do
-    // simple overflow checks, but we may eventually communicate other
-    // compilation errors this way.
-    if (CSLocs.size() > UINT16_MAX || LiveOuts.size() > UINT16_MAX) {
-      OS.AddComment("Invalid CallSite");
-      OS.emitIntValue(UINT64_MAX, 8); // Invalid ID.
-      OS.AddComment("  Offset");
-      OS.emitValue(CSI.CSOffsetExpr, 4);
-      OS.emitInt16(0); // Reserved.
-      OS.AddComment("  Num Locations");
-      OS.emitInt16(0); // 0 locations.
-      OS.emitInt16(0); // padding.
-      OS.AddComment("  Num Live-out Registers");
-      OS.emitInt16(0); // 0 live-out registers.
-      OS.emitInt32(0); // padding.
-      continue;
-    }
-
-    OS.AddComment("PatchPoint #" + Twine(CSI.ID));
-    OS.emitIntValue(CSI.ID, 8);
-    OS.AddComment("  Offset");
-    OS.emitValue(CSI.CSOffsetExpr, 4);
-
-    // Reserved for flags.
-    OS.emitInt16(0);
-    OS.AddComment("  Num Locations");
-    OS.emitInt16(CSLocs.size());
-
-    for (const auto &Loc : CSLocs) {
-      switch (Loc.Type) {
-        case Location::Unprocessed   : OS.AddComment("    Location: Unprocessed"  ); break;
-        case Location::Register      : OS.AddComment("    Location: Register"     ); break;
-        case Location::Direct        : OS.AddComment("    Location: Direct"       ); break;
-        case Location::Indirect      : OS.AddComment("    Location: Indirect"     ); break;
-        case Location::Constant      : OS.AddComment("    Location: Constant"     ); break;
-        case Location::ConstantIndex : OS.AddComment("    Location: ConstantIndex"); break;
-      }
-      OS.emitIntValue(Loc.Type, 1);
-      OS.emitIntValue(0, 1);  // Reserved
-      OS.AddComment("    Size");
-      OS.emitInt16(Loc.Size);
-      OS.AddComment("    Register");
-      OS.emitInt16(Loc.Reg);
-      OS.emitInt16(0); // Reserved
-      OS.AddComment("    Offset");
-      OS.emitInt32(Loc.Offset);
-    }
-
-    // Emit alignment to 8 byte.
-    OS.emitValueToAlignment(Align(8));
-
-    // Num live-out registers and padding to align to 4 byte.
-    OS.emitInt16(0);
-    OS.AddComment("  Num LiveOuts");
-    OS.emitInt16(LiveOuts.size());
-
-    for (const auto &LO : LiveOuts) {
-      OS.AddComment("    DWARF Reg Num");
-      OS.emitInt16(LO.DwarfRegNum);
-      OS.emitIntValue(0, 1);
-      OS.AddComment("    Size");
-      OS.emitIntValue(LO.Size, 1);
-    }
-    // Emit alignment to 8 byte.
-    OS.emitValueToAlignment(Align(8));
-  }
+  for (const auto &CSI : CSInfos)
+    emitCallsiteEntry(OS, CSI);
 }
 
 /// Serialize the stackmap data.
@@ -752,6 +796,19 @@ void StackMaps::serializeToStackMapSection() {
 
   MCContext &OutContext = AP.OutStreamer->getContext();
   MCStreamer &OS = *AP.OutStreamer;
+
+  // ROG precise GC: on ELF with an empty constant pool (always the case for
+  // ROG's deopt-pointer maps), emit one SHF_LINK_ORDER section per function so
+  // the map follows --gc-sections function liveness instead of being kept
+  // wholesale (which would resurrect dead functions through their recorded
+  // addresses). Fall back to the single-section layout otherwise: ConstantIndex
+  // locations are pool-relative and cannot be split per function.
+  if (OutContext.isELF() && ConstPool.empty()) {
+    serializeToStackMapSectionPerFunction();
+    CSInfos.clear();
+    ConstPool.clear();
+    return;
+  }
 
   // Create the section.
   MCSection *StackMapSection =
@@ -772,4 +829,71 @@ void StackMaps::serializeToStackMapSection() {
   // Clean up.
   CSInfos.clear();
   ConstPool.clear();
+}
+
+/// ROG precise GC: emit one self-describing stack-map blob per function, each in
+/// its own `.llvm_stackmaps` section tagged SHF_LINK_ORDER and linked to the
+/// function's text (and placed in the function's comdat group, if any). The
+/// linker keeps each blob exactly when it keeps the function and merges the
+/// survivors into the final `.llvm_stackmaps`; the runtime reads it as the same
+/// concatenation of self-describing blobs as before. The caller guarantees an
+/// empty constant pool, so every blob emits NumConstants = 0.
+void StackMaps::serializeToStackMapSectionPerFunction() {
+  MCContext &OutContext = AP.OutStreamer->getContext();
+  MCStreamer &OS = *AP.OutStreamer;
+
+  LLVM_DEBUG(dbgs() << "***** Stack Map Output (per-function) *****\n");
+
+  // CSInfos is ordered by function in FnInfos order, RecordCount entries each;
+  // walk both in lockstep.
+  unsigned CSIdx = 0;
+  for (const auto &[FnSym, FnInfo] : FnInfos) {
+    // Mirror the function's comdat group (if any) and link the section to the
+    // function's text via SHF_LINK_ORDER, so --gc-sections and comdat dedup
+    // drop the blob together with the function.
+    // On ELF (guaranteed by the caller) every symbol/section is an ELF variant.
+    const MCSymbolELF *FnSymELF = static_cast<const MCSymbolELF *>(FnSym);
+    const MCSymbolELF *Group = nullptr;
+    if (FnSym->isInSection())
+      Group = static_cast<const MCSectionELF &>(FnSym->getSection()).getGroup();
+
+    unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_LINK_ORDER;
+    if (Group)
+      Flags |= ELF::SHF_GROUP;
+
+    MCSectionELF *Sec = OutContext.getELFSection(
+        ".llvm_stackmaps", ELF::SHT_PROGBITS, Flags, /*EntrySize=*/0, Group,
+        /*IsComdat=*/Group != nullptr, MCSection::NonUniqueID, FnSymELF);
+    OS.switchSection(Sec);
+
+    // Self-describing header for a single function (no constants).
+    OS.emitIntValue(StackMapVersion, 1); // Version.
+    OS.emitIntValue(0, 1);               // Reserved.
+    OS.emitInt16(0);                     // Reserved.
+    OS.emitInt32(1);                     // Num Functions.
+    OS.emitInt32(0);                     // Num Constants.
+    OS.emitInt32(FnInfo.RecordCount);    // Num Records.
+
+    OS.AddComment("Function Address");
+    OS.emitSymbolValue(FnSym, 8);
+    OS.AddComment("  Stack Size");
+    OS.emitIntValue(FnInfo.StackSize, 8);
+    OS.AddComment("  Record Count");
+    OS.emitIntValue(FnInfo.RecordCount, 8);
+
+    // ROG extension: the callee-saved-register save area, as a [Lo, Hi) byte
+    // range relative to the frame pointer (the runtime scans it conservatively
+    // to recover GC pointers held in callee-saved registers across safepoints).
+    OS.AddComment("  CSR area Lo (rbp-relative)");
+    OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRLo), 4);
+    OS.AddComment("  CSR area Hi (rbp-relative)");
+    OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRHi), 4);
+
+    for (uint64_t I = 0; I < FnInfo.RecordCount; ++I, ++CSIdx)
+      emitCallsiteEntry(OS, CSInfos[CSIdx]);
+
+    OS.addBlankLine();
+  }
+  assert(CSIdx == CSInfos.size() &&
+         "per-function callsite count must cover all records");
 }

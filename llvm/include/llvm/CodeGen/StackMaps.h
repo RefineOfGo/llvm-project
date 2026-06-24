@@ -313,6 +313,16 @@ public:
   struct FunctionInfo {
     uint64_t StackSize = 0;
     uint64_t RecordCount = 1;
+    // ROG precise GC: the frame's callee-saved-register save area, as a
+    // [Lo, Hi) byte range relative to the frame pointer (RBP). Outer frames may
+    // hold live GC pointers in callee-saved registers; those are physically
+    // spilled into this area by inner frames, where the precise location map
+    // cannot see them, so the runtime scans this range conservatively. Hi==Lo
+    // means no callee-saved stack slots. Captured from MachineFrameInfo, so it
+    // is correct regardless of shrink-wrapping (which moves the save site, not
+    // the slot).
+    int32_t CSRLo = 0;
+    int32_t CSRHi = 0;
 
     FunctionInfo() = default;
     explicit FunctionInfo(uint64_t StackSize) : StackSize(StackSize) {}
@@ -408,6 +418,17 @@ private:
 
   /// Emit the callsite info for each stackmap/patchpoint intrinsic call.
   void emitCallsiteEntries(MCStreamer &OS);
+
+  /// Emit a single callsite record to \p OS.
+  void emitCallsiteEntry(MCStreamer &OS, const CallsiteInfo &CSI);
+
+  /// ROG precise GC: emit the stack map as one self-describing blob per
+  /// function, each in its own `.llvm_stackmaps` section tagged
+  /// SHF_LINK_ORDER and linked to that function's text. --gc-sections then
+  /// drops a function's records together with the function, so dead functions
+  /// are never resurrected through the map. Only valid when the constant pool
+  /// is empty (true for ROG's deopt-pointer maps).
+  void serializeToStackMapSectionPerFunction();
 
   LLVM_ABI void print(raw_ostream &OS);
   void debug() { print(dbgs()); }

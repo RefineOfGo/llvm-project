@@ -10,10 +10,12 @@ declare go_abiinternalcc i64 @abi_internal_add(i64, i64, i64)
 
 define i64 @caller(i64 %a, i64 %b, i64 %c) {
 ; The SysV caller (args in RDI/RSI/RDX) remaps to ABIInternal RAX/RBX/RCX.
+; Pin the source registers so a regression that drops the remap (e.g. leaves an
+; argument in its SysV register) is actually caught.
 ; CHECK-LABEL: caller:
-; CHECK-DAG: movq %r{{[a-z0-9]+}}, %rax
-; CHECK-DAG: movq %r{{[a-z0-9]+}}, %rbx
-; CHECK-DAG: movq %r{{[a-z0-9]+}}, %rcx
+; CHECK-DAG: movq %rdi, %rax
+; CHECK-DAG: movq %rsi, %rbx
+; CHECK-DAG: movq %rdx, %rcx
 ; CHECK-DAG: {{xorps|pxor|vxorps|vpxor}} {{.*}}%xmm15
 ; CHECK: callq abi_internal_add
   %r = call go_abiinternalcc i64 @abi_internal_add(i64 %a, i64 %b, i64 %c)
@@ -107,4 +109,27 @@ define double @caller_float(double %a, double %b) {
 ; CHECK: callq abi_internal_fadd
   %r = call go_abiinternalcc double @abi_internal_fadd(double %a, double %b)
   ret double %r
+}
+
+declare go_abiinternalcc void @abi_internal_sink(i64)
+
+define void @caller_base_pointer(i64 %n) {
+; The Go ABI regmask (CSR_64_NoneRegs) preserves only RBP, NOT the base pointer
+; (RBX on x86-64), and go_abiinternalcc uses RBX as an argument register. A
+; caller that needs a base pointer (a dynamic alloca forces a frame pointer, an
+; over-aligned object forces stack realignment) must therefore save/restore RBX
+; around the call. Regression guard: if the base-pointer clobber stops being
+; tracked, the push/pop %rbx bracketing the call disappears and frame access
+; through RBX is corrupted.
+; CHECK-LABEL: caller_base_pointer:
+; CHECK: movq %rsp, %rbx
+; CHECK: pushq %rbx
+; CHECK: callq abi_internal_sink
+; CHECK: popq %rbx
+  %dyn = alloca i8, i64 %n
+  %over = alloca <8 x i64>, align 64
+  store volatile <8 x i64> zeroinitializer, ptr %over, align 64
+  call go_abiinternalcc void @abi_internal_sink(i64 %n)
+  store volatile i8 7, ptr %dyn
+  ret void
 }

@@ -2688,14 +2688,20 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }();
   assert(Mask && "Missing call preserved mask for calling convention");
 
+  // For go_abi0cc/go_abiinternalcc the GoABI regmask (CSR_64_NoneRegs) keeps
+  // only RBP, the frame pointer, callee-preserved, so suppress the frame-pointer
+  // clobber tracking that would otherwise drive spillFPBP to save/restore it.
+  // The base pointer (RBX on x86-64) is NOT preserved by that mask — and
+  // go_abiinternalcc even uses RBX as an argument/result register — so its
+  // clobber MUST stay tracked, or a caller that needs a base pointer (dynamic
+  // alloca + stack realignment) would lose RBX across the call.
   if (!IsGoABI0 && !IsGoABIInternal &&
       MachineOperand::clobbersPhysReg(Mask, RegInfo->getFramePtr())) {
     X86Info->setFPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))
       X86Info->setFPClobberedByInvoke(true);
   }
-  if (!IsGoABI0 && !IsGoABIInternal &&
-      MachineOperand::clobbersPhysReg(Mask, RegInfo->getBaseRegister())) {
+  if (MachineOperand::clobbersPhysReg(Mask, RegInfo->getBaseRegister())) {
     X86Info->setBPClobberedByCall(true);
     if (CLI.CB && isa<InvokeInst>(CLI.CB))
       X86Info->setBPClobberedByInvoke(true);

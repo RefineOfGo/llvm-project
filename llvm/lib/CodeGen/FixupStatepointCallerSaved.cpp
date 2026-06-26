@@ -21,15 +21,22 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/FixupStatepointCallerSaved.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/VirtRegMap.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
+#include <cstdlib>
 
 using namespace llvm;
 
@@ -592,7 +599,306 @@ public:
     return true;
   }
 };
+// ROG strip-deopt spike (post-ISel, pre-RA, env-gated). Validates the "operand
+// through ISel, remove before RA" design: with -use-registers-for-deopt-values
+// the statepoint carries the live pointers as vreg operands after ISel (so they
+// are captured here), but those operands also pressure RA. This pass reads each
+// statepoint's deopt vreg operands and records them in a side table keyed by the
+// statepoint ID (globally unique via RogStackMap's NextId++), then rebuilds the
+// statepoint with an EMPTY deopt section so RA sees a plain call (no pressure,
+// like the statepoint-free baseline). A later post-RA pass (RogQueryDeopt) reads
+// the side table and resolves each captured vreg's final location.
+
+// Side table: statepoint ID -> captured deopt vregs (recorded pre-RA). LLVM may
+// codegen functions in parallel (one thread per module partition), so this is
+// thread_local: strip and query for a given function run on the same thread,
+// and different partitions get independent tables. Cleared per function.
+static DenseMap<uint64_t, SmallVector<Register, 8>> &rogDeoptTable() {
+  static thread_local DenseMap<uint64_t, SmallVector<Register, 8>> T;
+  return T;
+}
+
+class RogStripDeopt : public MachineFunctionPass {
+public:
+  static char ID;
+  RogStripDeopt() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override { return "ROG strip deopt (spike)"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    // Run after coalescing (so captured vregs are the final pre-RA names) but
+    // before greedy. Keep LiveIntervals/SlotIndexes valid via shrinkToUses.
+    AU.addRequired<LiveIntervalsWrapperPass>();
+    AU.addPreserved<LiveIntervalsWrapperPass>();
+    AU.addPreserved<SlotIndexesWrapperPass>();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    if (std::getenv("ROG_DISABLE_PRECISE_DEOPT"))
+      return false;
+    const Function &F = MF.getFunction();
+    if (!F.hasGC() || F.getGC() != "rog")
+      return false;
+
+    LiveIntervals &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+
+    // Bound the side table to this function: captured vregs are per-function, so
+    // clear before recording to avoid reading another function's (or module's)
+    // vreg numbers in the query pass. Safe because each MachineFunction runs the
+    // full machine pipeline (strip -> RA -> query) before the next one starts.
+    rogDeoptTable().clear();
+
+    SmallVector<MachineInstr *, 16> SPs;
+    for (MachineBasicBlock &BB : MF)
+      for (MachineInstr &I : BB)
+        if (I.getOpcode() == TargetOpcode::STATEPOINT)
+          SPs.push_back(&I);
+    if (SPs.empty())
+      return false;
+
+    unsigned NCaptured = 0;
+    bool Changed = false;
+    SmallSet<Register, 32> Affected;
+    for (MachineInstr *MI : SPs) {
+      unsigned E = MI->getNumOperands();
+      unsigned VI = StatepointOpers(MI).getVarIdx();
+      if (VI + 5 >= E || !MI->getOperand(VI + 5).isImm())
+        continue;
+      unsigned NumDeopt = MI->getOperand(VI + 5).getImm();
+      uint64_t SpID = StatepointOpers(MI).getID();
+      SmallVector<Register, 8> Captured;
+      unsigned K = VI + 6;
+      for (unsigned D = 0; D < NumDeopt && K < E; ++D) {
+        const MachineOperand &MO = MI->getOperand(K);
+        unsigned N = 1;
+        if (MO.isImm()) {
+          switch (MO.getImm()) {
+          case StackMaps::DirectMemRefOp: N = 3; break;
+          case StackMaps::IndirectMemRefOp: N = 4; break;
+          case StackMaps::ConstantOp: N = 2; break;
+          default: N = 1; break;
+          }
+        } else if (MO.isReg() && MO.getReg().isVirtual()) {
+          Captured.push_back(MO.getReg());
+          ++NCaptured;
+        }
+        K += N;
+      }
+      unsigned DeoptEnd = K;
+      if (DeoptEnd <= VI + 6)
+        continue;
+      if (!Captured.empty()) {
+        for (Register R : Captured)
+          Affected.insert(R);
+        rogDeoptTable()[SpID] = std::move(Captured);
+      }
+
+      // In place: drop the whole deopt section [VI+6, DeoptEnd) (removing reg
+      // uses updates MRI use lists) and set numdeopt = 0. Instruction indices
+      // are untouched, so SlotIndexes stay valid; LiveIntervals are repaired
+      // below.
+      for (unsigned Idx = DeoptEnd; Idx > VI + 6; --Idx)
+        MI->removeOperand(Idx - 1);
+      MI->getOperand(VI + 5).setImm(0);
+      Changed = true;
+    }
+
+    // Repair LiveIntervals: dropping the deopt uses may shorten a value's live
+    // range (it is no longer kept live across the call by the statepoint use),
+    // which is exactly what relieves RA pressure.
+    for (Register V : Affected) {
+      if (!LIS.hasInterval(V))
+        continue;
+      if (MRI.reg_nodbg_empty(V))
+        LIS.removeInterval(V);
+      else
+        LIS.shrinkToUses(&LIS.getInterval(V));
+    }
+
+    if (std::getenv("ROG_STRIP_DEOPT_DEBUG"))
+      errs() << "[strip-deopt] " << MF.getName() << " statepoints=" << SPs.size()
+             << " captured_vregs=" << NCaptured << "\n";
+    return Changed;
+  }
+};
+char RogStripDeopt::ID = 0;
+
+// Post-RA / pre-rewrite query spike: for each STATEPOINT, look up its captured
+// deopt vregs (recorded pre-RA by RogStripDeopt) and resolve each vreg's final
+// location at the statepoint's slot index. Splitting is followed via
+// VirtRegMap::getOriginal (the captured pre-RA vreg is the split root); the live
+// descendant covering the safepoint slot gives the location (physreg or stack
+// slot). Prints per-function resolution stats. Must run after register
+// allocation but BEFORE VirtRegRewriter (needs live VirtRegMap + LiveIntervals
+// and vregs still present).
+class RogQueryDeopt : public MachineFunctionPass {
+public:
+  static char ID;
+  RogQueryDeopt() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override { return "ROG query deopt (spike)"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<VirtRegMapWrapperLegacy>();
+    AU.addRequired<LiveIntervalsWrapperPass>();
+    AU.setPreservesAll();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    if (std::getenv("ROG_DISABLE_PRECISE_DEOPT"))
+      return false;
+    const Function &F = MF.getFunction();
+    if (!F.hasGC() || F.getGC() != "rog")
+      return false;
+
+    VirtRegMap &VRM = getAnalysis<VirtRegMapWrapperLegacy>().getVRM();
+    LiveIntervals &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+    MachineFrameInfo &MFI = MF.getFrameInfo();
+    // Ensure VirtRegMap's per-vreg maps cover every current vreg (passes after
+    // RA may have added vregs without growing it); const indexing asserts on
+    // out-of-range vregs.
+    VRM.grow();
+
+    // original-vreg -> all descendants (covers RA splitting). The captured
+    // pre-RA vreg is the split root returned by getOriginal. Include vregs with
+    // no live interval: a split piece that was later spilled has its interval
+    // removed but still carries the stack slot we need for the slot lookup.
+    DenseMap<Register, SmallVector<Register, 4>> Children;
+    for (unsigned i = 0, e = MRI.getNumVirtRegs(); i != e; ++i) {
+      Register V = Register::index2VirtReg(i);
+      Children[VRM.getOriginal(V)].push_back(V);
+    }
+
+    // Resolve where the value derived from captured root Orig lives at safepoint
+    // slot S. Candidates are Orig plus its split descendants (getOriginal==Orig).
+    //   1 = live in a phys reg across S (a callee-saved reg; survives the call)
+    //   2 = spilled to a stack slot (value sits in the slot across the call;
+    //       no vreg interval covers S because reloads are tight around uses)
+    //   0 = unresolved (value not live at S, or root coalesced away pre-RA)
+    auto resolve = [&](Register Orig, SlotIndex S, int &OutFI) -> int {
+      OutFI = VirtRegMap::NO_STACK_SLOT;
+      SmallVector<Register, 8> Cands;
+      Cands.push_back(Orig);
+      if (auto cit = Children.find(Orig); cit != Children.end())
+        for (Register C : cit->second)
+          if (C != Orig)
+            Cands.push_back(C);
+      // Prefer a phys reg live across S.
+      for (Register C : Cands)
+        if (LIS.hasInterval(C) && !MRI.reg_nodbg_empty(C) &&
+            LIS.getInterval(C).liveAt(S) && VRM.hasPhys(C))
+          return 1;
+      // Otherwise a spilled candidate: the value resides in its stack slot
+      // across the call.
+      for (Register C : Cands) {
+        int SS = VRM.getStackSlot(C);
+        if (SS != VirtRegMap::NO_STACK_SLOT) {
+          OutFI = SS;
+          return 2;
+        }
+      }
+      return 0;
+    };
+
+    // Is any candidate's live interval live at S (ignoring its location)?
+    auto liveAtS = [&](Register Orig, SlotIndex S) -> bool {
+      auto chk = [&](Register C) {
+        return LIS.hasInterval(C) && !MRI.reg_nodbg_empty(C) &&
+               LIS.getInterval(C).liveAt(S);
+      };
+      if (chk(Orig))
+        return true;
+      if (auto cit = Children.find(Orig); cit != Children.end())
+        for (Register C : cit->second)
+          if (chk(C))
+            return true;
+      return false;
+    };
+
+    unsigned NReg = 0, NSlot = 0, NMiss = 0, NMissStale = 0, NMissDeadAtS = 0,
+             NMissLiveNoLoc = 0, NTotal = 0;
+    bool Changed = false;
+    for (MachineBasicBlock &BB : MF) {
+      for (MachineInstr &MI : BB) {
+        if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+          continue;
+        uint64_t SpID = StatepointOpers(&MI).getID();
+        auto It = rogDeoptTable().find(SpID);
+        if (It == rogDeoptTable().end())
+          continue;
+        SlotIndex S = LIS.getInstructionIndex(MI);
+        SmallVector<int, 8> SlotFIs; // stack slots to record at this safepoint
+        for (Register Orig : It->second) {
+          ++NTotal;
+          int FI;
+          switch (resolve(Orig, S, FI)) {
+          case 1: ++NReg; break; // CSR reg: covered by conservative CSR scan
+          case 2: ++NSlot; SlotFIs.push_back(FI); break;
+          default: {
+            ++NMiss;
+            // Classify the miss: "stale" = the whole vreg lineage of the
+            // captured root is gone (every candidate is dead with no slot) ->
+            // the value was renamed away (coalescing) between strip (pre-RA) and
+            // RA, so we lost the handle (dangerous: a real root we cannot
+            // locate). Otherwise the value is present but not live across S
+            // (plausibly program-dead at the safepoint -> safe to drop).
+            bool anyPresence = false;
+            auto seen = [&](Register C) {
+              if (!MRI.reg_nodbg_empty(C) ||
+                  VRM.getStackSlot(C) != VirtRegMap::NO_STACK_SLOT)
+                anyPresence = true;
+            };
+            seen(Orig);
+            if (auto cit = Children.find(Orig); cit != Children.end())
+              for (Register C : cit->second)
+                seen(C);
+            if (!anyPresence)
+              ++NMissStale;
+            else if (liveAtS(Orig, S))
+              ++NMissLiveNoLoc; // live at S but no resolvable location (bug?)
+            else
+              ++NMissDeadAtS; // present elsewhere but not live across S
+            break;
+          }
+          }
+        }
+
+        // Re-inject the resolved stack-slot roots as deopt operands so the
+        // standard StackMaps emission records them. Encode each as the
+        // statepoint indirect-memref quad [IndirectMemRefOp, size, FI, 0]; PEI
+        // resolves the FI to FrameReg+offset (matching emitPatchPoint's form),
+        // and StackSlotColoring remaps the FI if slots are merged. Inserted at
+        // the start of the (currently empty) deopt section, right after the
+        // num-deopt operand; num-deopt is set to the count. Reg roots are left
+        // to the runtime's conservative callee-saved scan; dead roots dropped.
+        if (!SlotFIs.empty()) {
+          unsigned VI = StatepointOpers(&MI).getVarIdx();
+          SmallVector<MachineOperand, 32> NewOps;
+          for (int FI : SlotFIs) {
+            NewOps.push_back(MachineOperand::CreateImm(StackMaps::IndirectMemRefOp));
+            NewOps.push_back(MachineOperand::CreateImm(MFI.getObjectSize(FI)));
+            NewOps.push_back(MachineOperand::CreateFI(FI));
+            NewOps.push_back(MachineOperand::CreateImm(0));
+          }
+          MI.insert(MI.operands_begin() + (VI + 6), NewOps);
+          MI.getOperand(VI + 5).setImm(SlotFIs.size());
+          Changed = true;
+        }
+      }
+    }
+    if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NTotal)
+      errs() << "[query-deopt] " << MF.getName() << " total=" << NTotal
+             << " reg=" << NReg << " slot=" << NSlot << " miss=" << NMiss
+             << " (stale=" << NMissStale << " deadAtS=" << NMissDeadAtS
+             << " liveNoLoc=" << NMissLiveNoLoc << ")\n";
+    return Changed;
+  }
+};
+char RogQueryDeopt::ID = 0;
 } // namespace
+
+namespace llvm {
+FunctionPass *createRogStripDeopt() { return new RogStripDeopt(); }
+FunctionPass *createRogQueryDeopt() { return new RogQueryDeopt(); }
+} // namespace llvm
 
 bool FixupStatepointCallerSavedImpl::run(MachineFunction &MF) {
   const Function &F = MF.getFunction();

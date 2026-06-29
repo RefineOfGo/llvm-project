@@ -53,8 +53,15 @@
 #include <cassert>
 #include <optional>
 #include <string>
+#include <cstdlib>
 
 using namespace llvm;
+
+namespace llvm {
+// ROG strip-deopt spike (defined in FixupStatepointCallerSaved.cpp).
+FunctionPass *createRogStripDeopt();
+FunctionPass *createRogQueryDeopt();
+} // namespace llvm
 
 static cl::opt<bool>
     EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
@@ -1444,11 +1451,21 @@ bool TargetPassConfig::addRegAssignAndRewriteFast() {
 }
 
 bool TargetPassConfig::addRegAssignAndRewriteOptimized() {
+  // ROG precise GC: strip statepoint deopt operands after coalescing /
+  // scheduling (so captured vregs are the final pre-RA names) but right before
+  // greedy, so RA sees a plain call (no operand pressure).
+  addPass(llvm::createRogStripDeopt());
+
   // Add the selected register allocation pass.
   addPass(createRegAllocPass(true));
 
   // Allow targets to change the register assignments before rewriting.
   addPreRewrite();
+
+  // ROG precise GC: resolve captured deopt vregs to their final locations while
+  // VirtRegMap + LiveIntervals are live and vregs are not yet rewritten, and
+  // re-inject the stack-slot roots as deopt operands for stack-map emission.
+  addPass(llvm::createRogQueryDeopt());
 
   // Finally rewrite virtual registers.
   addPass(&VirtRegRewriterID);

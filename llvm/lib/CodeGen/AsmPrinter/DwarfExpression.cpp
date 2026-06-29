@@ -17,6 +17,7 @@
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -141,7 +142,9 @@ bool DwarfExpression::addMachineReg(const TargetRegisterInfo &TRI,
   // For example, Q0 on ARM is a composition of D0+D1.
   unsigned CurPos = 0;
   // The size of the register in bits.
-  const TargetRegisterClass *RC = TRI.getMinimalPhysRegClass(MachineReg);
+  const TargetRegisterClass *RC = TRI.getMinimalPhysRegClassLLT(MachineReg);
+  if (!RC)
+    return false;
   unsigned RegSize = TRI.getRegSizeInBits(*RC);
   // Keep track of the bits in the register we already emitted, so we
   // can avoid emitting redundant aliasing subregs. Because this is

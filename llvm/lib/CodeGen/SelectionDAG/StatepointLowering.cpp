@@ -47,6 +47,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <tuple>
 #include <utility>
@@ -61,8 +62,14 @@ STATISTIC(NumOfStatepoints, "Number of statepoint nodes encountered");
 STATISTIC(StatepointMaxSlotsRequired,
           "Maximum number of stack slots required for a singe statepoint");
 
+// ROG precise GC: default true. ROG keeps statepoint deopt pointers in
+// registers (instead of pre-spilling them to dedicated slots, which inflates the
+// frame) so the post-RA RogStripDeopt/RogQueryDeopt passes can capture each
+// root's vreg and record its final location. Without this the deopt values are
+// pre-spilled frame indices, the strip pass captures no vregs, and the emitted
+// stack maps would be empty.
 static cl::opt<bool> UseRegistersForDeoptValues(
-    "use-registers-for-deopt-values", cl::Hidden, cl::init(false),
+    "use-registers-for-deopt-values", cl::Hidden, cl::init(true),
     cl::desc("Allow using registers for non pointer deopt args"));
 
 static cl::opt<bool> UseRegistersForGCPointersInLandingPad(
@@ -606,7 +613,12 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
       return true;
     if (isGCValue(V, Builder))
       return !LowerAsVReg.count(Builder.getValue(V));
-    return !(LiveInDeopt || UseRegistersForDeoptValues);
+    // ROG kill switch: ROG_DISABLE_PRECISE_DEOPT forces pre-spilling (the old
+    // GC-safe behavior), keeping deopt values off vregs so the strip/query
+    // passes -- which also bail under this env -- have nothing to do.
+    return !(LiveInDeopt ||
+             (UseRegistersForDeoptValues &&
+              !std::getenv("ROG_DISABLE_PRECISE_DEOPT")));
   };
 
   // Before we actually start lowering (and allocating spill slots for values),

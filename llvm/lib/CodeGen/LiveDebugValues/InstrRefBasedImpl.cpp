@@ -1596,13 +1596,7 @@ std::optional<ValueIDNum> InstrRefBasedLDV::getValueForInstrRef(
       for (const auto *TRCI : TRI->regclasses())
         if (TRCI->contains(Reg))
           TRC = TRCI;
-      if (!TRC) {
-        // Some target-specific physical registers (for example x86 SSP) do
-        // not belong to a normal register class and cannot be expressed as
-        // user variable locations. Treat the value as unavailable instead of
-        // asserting while lowering debug info.
-        return std::nullopt;
-      }
+      assert(TRC && "Couldn't find target register class?");
 
       // If the register we have isn't the right size or in the right place,
       // Try to find a subregister inside it.

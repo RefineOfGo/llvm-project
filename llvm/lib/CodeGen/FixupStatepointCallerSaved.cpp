@@ -21,21 +21,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/FixupStatepointCallerSaved.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LiveDebugVariables.h"
 #include "llvm/CodeGen/LiveIntervals.h"
-#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
@@ -616,7 +619,6 @@ public:
 
 struct RogDeoptInfo {
   SmallVector<Register, 8> Captured;
-  SmallVector<std::pair<Register, int>, 8> Materialized;
   // Non-register deopt entries (alloca Direct mem-refs + their trailing size
   // Constants emitted by RogStackMap for address-taken pointer-bearing stack
   // objects) that strip removes wholesale. The query pass re-emits these
@@ -627,8 +629,8 @@ struct RogDeoptInfo {
   unsigned PreservedEntries = 0;
 };
 
-// Side table: statepoint ID -> captured deopt vregs and any pre-RA materialized
-// stack slots. LLVM may codegen functions in parallel (one thread per module
+// Side table: statepoint ID -> captured deopt vregs (and preserved imm-tag
+// entries). LLVM may codegen functions in parallel (one thread per module
 // partition), so this is thread_local: strip and query for a given function run
 // on the same thread, and different partitions get independent tables. Cleared
 // per function.
@@ -646,10 +648,8 @@ public:
     // Run after coalescing (so captured vregs are the final pre-RA names) but
     // before greedy. Keep LiveIntervals/SlotIndexes valid via shrinkToUses.
     AU.addRequired<LiveIntervalsWrapperPass>();
-    AU.addRequired<MachineDominatorTreeWrapperPass>();
     AU.addPreserved<LiveIntervalsWrapperPass>();
     AU.addPreserved<LiveDebugVariablesWrapperLegacy>();
-    AU.addPreserved<MachineDominatorTreeWrapperPass>();
     AU.addPreserved<SlotIndexesWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
@@ -661,12 +661,6 @@ public:
       return false;
 
     LiveIntervals &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
-    MachineDominatorTree &MDT =
-        getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
-    MachineRegisterInfo &MRI = MF.getRegInfo();
-    MachineFrameInfo &MFI = MF.getFrameInfo();
-    const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
-    const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
 
     // Bound the side table to this function: captured vregs are per-function, so
     // clear before recording to avoid reading another function's (or module's)
@@ -683,28 +677,8 @@ public:
       return false;
 
     unsigned NCaptured = 0;
-    unsigned NMaterialized = 0;
-    unsigned NMaterializeSkippedNoDom = 0;
     bool Changed = false;
     SmallSet<Register, 32> Affected;
-    DenseMap<uint64_t, SmallVector<int, 4>> MaterializeSlots;
-    auto getMaterializeSlot = [&](const TargetRegisterClass *RC,
-                                  DenseMap<uint64_t, unsigned> &NextSlot) {
-      unsigned Size = TRI.getSpillSize(*RC);
-      Align Alignment = TRI.getSpillAlign(*RC);
-      uint64_t Key = (uint64_t(Size) << 32) | uint64_t(Alignment.value());
-      unsigned &Idx = NextSlot[Key];
-      SmallVector<int, 4> &Slots = MaterializeSlots[Key];
-      if (Idx == Slots.size())
-        Slots.push_back(MFI.CreateSpillStackObject(Size, Alignment));
-      return Slots[Idx++];
-    };
-    auto hasSingleDominatingDef = [&](Register R, MachineInstr &UseMI) {
-      MachineOperand *DefOp = MRI.getOneDef(R);
-      if (!DefOp)
-        return false;
-      return MDT.dominates(DefOp->getParent(), &UseMI);
-    };
 
     for (MachineInstr *MI : SPs) {
       unsigned E = MI->getNumOperands();
@@ -778,63 +752,9 @@ public:
         LIS.shrinkToUses(&LIS.getInterval(V));
     }
 
-    // Some captured roots are only live for GC, not for later program uses. Once
-    // the deopt operands are stripped, their vregs are no longer live at the
-    // safepoint and the post-RA query cannot recover a location. Materialize
-    // those roots with an ordinary pre-call store: RA only has to keep the value
-    // live until the store, while the stack map records the store slot.
-    for (MachineInstr *MI : SPs) {
-      uint64_t SpID = StatepointOpers(MI).getID();
-      auto It = rogDeoptTable().find(SpID);
-      if (It == rogDeoptTable().end())
-        continue;
-      RogDeoptInfo &Info = It->second;
-      if (Info.Captured.empty())
-        continue;
-
-      SlotIndex S = LIS.getInstructionIndex(*MI).getDeadSlot();
-      DenseMap<uint64_t, unsigned> NextSlot;
-      MachineBasicBlock *BB = MI->getParent();
-      MachineBasicBlock::iterator InsertBefore(MI);
-      MachineBasicBlock::iterator FirstInserted = InsertBefore;
-      SmallVector<Register, 8> RepairedRegs;
-      for (Register R : Info.Captured) {
-        if (LIS.hasInterval(R) && LIS.getInterval(R).liveAt(S))
-          continue;
-        if (!hasSingleDominatingDef(R, *MI)) {
-          ++NMaterializeSkippedNoDom;
-          continue;
-        }
-        const TargetRegisterClass *RC = MRI.getRegClass(R);
-        int FI = getMaterializeSlot(RC, NextSlot);
-        MachineBasicBlock::iterator StoreBegin = InsertBefore;
-        if (StoreBegin != BB->begin())
-          --StoreBegin;
-        TII.storeRegToStackSlot(*BB, InsertBefore, R, /*isKill=*/false, FI, RC,
-                                Register());
-        StoreBegin =
-            StoreBegin == InsertBefore ? BB->begin() : std::next(StoreBegin);
-        for (MachineBasicBlock::iterator I = StoreBegin; I != InsertBefore; ++I)
-          LIS.InsertMachineInstrInMaps(*I);
-        if (StoreBegin != InsertBefore && FirstInserted == InsertBefore)
-          FirstInserted = StoreBegin;
-        if (LIS.hasInterval(R))
-          LIS.removeInterval(R);
-        Info.Materialized.push_back(std::make_pair(R, FI));
-        RepairedRegs.push_back(R);
-        ++NMaterialized;
-      }
-
-      if (FirstInserted != InsertBefore)
-        LIS.repairIntervalsInRange(BB, FirstInserted, InsertBefore,
-                                   RepairedRegs);
-    }
-
     if (std::getenv("ROG_STRIP_DEOPT_DEBUG"))
       errs() << "[strip-deopt] " << MF.getName() << " statepoints=" << SPs.size()
-             << " captured_vregs=" << NCaptured
-             << " materialized_vregs=" << NMaterialized
-             << " skipped_no_dom=" << NMaterializeSkippedNoDom << "\n";
+             << " captured_vregs=" << NCaptured << "\n";
     return Changed;
   }
 };
@@ -982,7 +902,7 @@ public:
     };
 
     unsigned NReg = 0, NRegPreserved = 0, NRegClobbered = 0, NRegSpilled = 0,
-             NSlot = 0, NMaterialized = 0, NObjectFallbacks = 0,
+             NSlot = 0, NObjectFallbacks = 0,
              NObjectFallbackSlots = 0, NMMOFallbacks = 0,
              NMMOFallbackSlots = 0, NMiss = 0, NMissStale = 0,
              NMissDeadAtS = 0, NMissLiveNoLoc = 0, NTotal = 0;
@@ -998,18 +918,9 @@ public:
         RogDeoptInfo &Info = It->second;
         SlotIndex S = LIS.getInstructionIndex(MI).getDeadSlot();
         SmallVector<int, 8> SlotFIs; // stack slots to record at this safepoint
-        SmallSet<Register, 8> MaterializedRoots;
-        for (const auto &[Orig, FI] : Info.Materialized) {
-          ++NTotal;
-          ++NMaterialized;
-          MaterializedRoots.insert(Orig);
-          SlotFIs.push_back(FI);
-        }
         SmallSet<unsigned, 8> LateSpilledRegIds;
         bool NeedsObjectFallback = false;
         for (Register Orig : Info.Captured) {
-          if (MaterializedRoots.count(Orig))
-            continue;
           ++NTotal;
           int FI;
           MCRegister Phys;
@@ -1148,7 +1059,6 @@ public:
              << " reg=" << NReg << " (preserved=" << NRegPreserved
              << " clobbered=" << NRegClobbered
              << " late_spilled=" << NRegSpilled << ") slot=" << NSlot
-             << " materialized=" << NMaterialized
              << " mmo_fallbacks=" << NMMOFallbacks
              << " mmo_slots=" << NMMOFallbackSlots
              << " object_fallbacks=" << NObjectFallbacks
@@ -1160,11 +1070,226 @@ public:
   }
 };
 char RogQueryDeopt::ID = 0;
+
+// ===========================================================================
+// RogGcReadDeopt (ROG_GC_DBG_READ): the debug-value "late use" reader.
+//
+// Runs in addPreEmitPass2 -- after LiveDebugValues has resolved the $gcroot
+// markers (emitted by RogStackMap under ROG_GC_DBG) to physical locations, and
+// after PEI resolved frame indices. For each STATEPOINT it reads the live
+// $gcroot markers' resolved locations and injects the stack-slot ones as deopt
+// operands, exactly like RogQueryDeopt -- but the location source is the
+// zero-overhead debug-value channel instead of statepoint operands (which
+// constrain RA). Register (callee-saved) roots are left to the conservative CSR
+// scan, matching RogQueryDeopt. With ROG_STACKMAP_MAXOPS=0 (empty deopt at
+// ISEL, no operands, no overhead) + ROG_GC_DBG + this reader, precise GC is
+// driven entirely by debug-value markers.
+// ===========================================================================
+class RogGcReadDeopt : public MachineFunctionPass {
+public:
+  static char ID;
+  RogGcReadDeopt() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override { return "ROG gc-dbg deopt reader"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    // Default-on: consume the $gcroot markers emitted by RogStackMap. The
+    // opt-out matches the emitter (ROG_GC_DBG_DISABLE forces the legacy operand
+    // path), in which case there are no markers and this is a cheap no-op.
+    if (std::getenv("ROG_GC_DBG_DISABLE"))
+      return false;
+    bool Dbg = std::getenv("ROG_STRIP_DEOPT_DEBUG") != nullptr;
+
+    // Current resolved location of each live $gcroot marker. `slot` => an
+    // indirect [base - off] spill slot (injected); otherwise a register
+    // location (left to conservative CSR scan).
+    struct Loc {
+      bool slot = false;
+      Register base;
+      int64_t off = 0;
+    };
+    DenseMap<const DILocalVariable *, Loc> Live;
+
+    auto isGcRoot = [](const DILocalVariable *V) {
+      return V && V->getName().starts_with("$gcroot");
+    };
+
+    const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+    const BitVector Reserved = TRI.getReservedRegs(MF);
+
+    // Classify a $gcroot marker (DBG_VALUE or DBG_VALUE_LIST, single location R)
+    // by interpreting its DIExpression to recover where the GC pointer actually
+    // is at the safepoint:
+    //   bare / [DW_OP_LLVM_arg 0]                    -> value in register R
+    //   [.. DW_OP_deref]                             -> value at *(R + off)
+    //   [.. DW_OP_stack_value] (no deref)            -> value is R + off
+    // Returns false if the location was dropped ($noreg) or uses an op we don't
+    // model. Sets L.slot only for a memory load off a RESERVED register (frame /
+    // stack / base pointer = a genuine stack slot): those are the roots that
+    // neither the conservative callee-saved scan (register roots) nor the heap
+    // traversal (a load off a value register is a heap-object field) covers, so
+    // only they must be injected. A computed/interior pointer's base register is
+    // itself conservatively scanned. An interior offset trailing a deref is
+    // irrelevant for ROG's non-moving GC (the base load already reaches it).
+    // Returns 0 = recorded, 1 = multi-operand, 2 = $noreg (LLVM dropped it),
+    // 3 = unmodeled DIExpression op (diagnostic split of the "lost" bucket).
+    auto classify = [&](const MachineInstr &MI, Loc &L) -> int {
+      if (MI.getNumDebugOperands() != 1)
+        return 1;
+      const MachineOperand &MO = MI.getDebugOperand(0);
+      if (!MO.isReg() || !MO.getReg())
+        return 2; // $noreg => location lost by LiveDebugValues (not reader-fixable)
+      Register R = MO.getReg();
+      const DIExpression *E = MI.getDebugExpression();
+      ArrayRef<uint64_t> Els = E ? E->getElements() : ArrayRef<uint64_t>();
+      size_t i = 0;
+      if (i + 1 < Els.size() && Els[i] == dwarf::DW_OP_LLVM_arg &&
+          Els[i + 1] == 0)
+        i += 2;
+      int64_t off = 0;
+      bool deref = false;
+      while (i < Els.size()) {
+        uint64_t op = Els[i];
+        if (op == dwarf::DW_OP_constu && i + 2 < Els.size() &&
+            Els[i + 2] == dwarf::DW_OP_minus) {
+          off -= (int64_t)Els[i + 1];
+          i += 3;
+        } else if (op == dwarf::DW_OP_constu && i + 2 < Els.size() &&
+                   Els[i + 2] == dwarf::DW_OP_plus) {
+          off += (int64_t)Els[i + 1];
+          i += 3;
+        } else if (op == dwarf::DW_OP_plus_uconst && i + 1 < Els.size()) {
+          off += (int64_t)Els[i + 1];
+          i += 2;
+        } else if (op == dwarf::DW_OP_deref) {
+          deref = true;
+          break; // interior offset after the load is irrelevant (non-moving)
+        } else if (op == dwarf::DW_OP_stack_value) {
+          break;
+        } else {
+          if (Dbg) {
+            errs() << "[gc-read] UNMODELED $gcroot expr on "
+                   << MF.getName() << ": [";
+            for (uint64_t E2 : Els)
+              errs() << " " << E2;
+            errs() << " ]\n";
+          }
+          return 3; // unmodeled op => reader-fixable gap
+        }
+      }
+      if (MI.getOpcode() == TargetOpcode::DBG_VALUE && MI.isIndirectDebugValue())
+        deref = true;
+      L.slot = deref && Reserved.test(R.id());
+      L.base = R;
+      L.off = off;
+      return 0;
+    };
+
+    unsigned NInject = 0, NReg = 0, NSP = 0;
+    // Split of the roots we could not inject: a multi-operand DBG_VALUE_LIST, a
+    // $noreg location (LiveDebugValues dropped it -- covered by the conservative
+    // callee-saved scan / alloca / heap), or an unmodeled DIExpression form.
+    unsigned NLostMultiOp = 0, NLostNoReg = 0, NLostUnmodeled = 0;
+    // The $gcroot debug values exist only to carry GC-root locations to this
+    // reader. Once consumed they must NOT reach the DWARF emitter (AsmPrinter,
+    // which runs after this pass), or they pollute .debug_info/.debug_loclists
+    // with fake `$gcroot.N` locals. Collect and erase them here.
+    SmallVector<MachineInstr *, 32> GcDbgToErase;
+    bool Changed = false;
+    for (MachineBasicBlock &MBB : MF) {
+      for (MachineInstr &MI : MBB) {
+        if (MI.getOpcode() == TargetOpcode::DBG_VALUE ||
+            MI.getOpcode() == TargetOpcode::DBG_VALUE_LIST) {
+          const DILocalVariable *V = MI.getDebugVariable();
+          if (!isGcRoot(V))
+            continue;
+          GcDbgToErase.push_back(&MI);
+          Loc L;
+          switch (classify(MI, L)) {
+          case 0:
+            Live[V] = L;
+            break;
+          case 1:
+            Live.erase(V);
+            ++NLostMultiOp;
+            break;
+          case 2:
+            Live.erase(V);
+            ++NLostNoReg;
+            break;
+          default:
+            Live.erase(V);
+            ++NLostUnmodeled;
+            break;
+          }
+          continue;
+        }
+
+        if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+          continue;
+        ++NSP;
+
+        // Inject each live slot marker as an indirect-memref deopt operand in
+        // the form StackMaps expects post-PEI: [IndirectMemRefOp, size, baseReg,
+        // offset] -- the marker already gives baseReg+offset (e.g. $rbp - 48),
+        // so no frame-index round-trip is needed. Dedup by (reg, offset) since a
+        // pointer live across several calls leaves a marker per call that may
+        // linger to the same slot.
+        SmallVector<std::pair<Register, int64_t>, 8> Slots;
+        SmallSet<int64_t, 8> Seen;
+        for (auto &KV : Live) {
+          const Loc &L = KV.second;
+          if (!L.slot) {
+            ++NReg;
+            continue;
+          }
+          int64_t Key = ((int64_t)L.base.id() << 32) ^ (L.off & 0xffffffff);
+          if (Seen.insert(Key).second)
+            Slots.push_back({L.base, L.off});
+        }
+
+        if (Slots.empty())
+          continue;
+
+        unsigned VI = StatepointOpers(&MI).getVarIdx();
+        SmallVector<MachineOperand, 16> NewOps;
+        for (auto &S : Slots) {
+          NewOps.push_back(
+              MachineOperand::CreateImm(StackMaps::IndirectMemRefOp));
+          NewOps.push_back(MachineOperand::CreateImm(8)); // pointer size
+          NewOps.push_back(MachineOperand::CreateReg(S.first, /*isDef=*/false));
+          NewOps.push_back(MachineOperand::CreateImm(S.second));
+        }
+        unsigned PrevDeopt = MI.getOperand(VI + 5).getImm();
+        MI.insert(MI.operands_begin() + (VI + 6), NewOps);
+        MI.getOperand(VI + 5).setImm(PrevDeopt + Slots.size());
+        NInject += Slots.size();
+        Changed = true;
+      }
+    }
+    // Drop the consumed $gcroot markers so they never reach the DWARF emitter.
+    for (MachineInstr *DbgMI : GcDbgToErase) {
+      DbgMI->eraseFromParent();
+      Changed = true;
+    }
+    if (Dbg && NSP)
+      errs() << "[gc-read] " << MF.getName() << " sps=" << NSP
+             << " injected=" << NInject << " reg_skipped=" << NReg
+             << " lost(multiop=" << NLostMultiOp << " noreg=" << NLostNoReg
+             << " unmodeled=" << NLostUnmodeled << ")\n";
+    return Changed;
+  }
+};
+char RogGcReadDeopt::ID = 0;
 } // namespace
 
 namespace llvm {
 FunctionPass *createRogStripDeopt() { return new RogStripDeopt(); }
 FunctionPass *createRogQueryDeopt() { return new RogQueryDeopt(); }
+FunctionPass *createRogGcReadDeopt() { return new RogGcReadDeopt(); }
 } // namespace llvm
 
 bool FixupStatepointCallerSavedImpl::run(MachineFunction &MF) {

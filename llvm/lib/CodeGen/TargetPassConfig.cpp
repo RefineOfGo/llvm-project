@@ -61,6 +61,7 @@ namespace llvm {
 // ROG strip-deopt spike (defined in FixupStatepointCallerSaved.cpp).
 FunctionPass *createRogStripDeopt();
 FunctionPass *createRogQueryDeopt();
+FunctionPass *createRogGcReadDeopt();
 } // namespace llvm
 
 static cl::opt<bool>
@@ -1243,6 +1244,10 @@ void TargetPassConfig::addMachinePasses() {
   addPass(&RemoveLoadsIntoFakeUsesID);
   addPass(&StackMapLivenessID);
   addPass(&LiveDebugValuesID);
+  // ROG precise-GC debug-value reader: after LiveDebugValues has resolved the
+  // $gcroot markers to physical locations, inject the spill-slot roots into the
+  // statepoint deopt section (gated by ROG_GC_DBG_READ). No-op otherwise.
+  addPass(createRogGcReadDeopt());
   addPass(&MachineSanitizerBinaryMetadataID);
 
   if (TM->Options.EnableMachineOutliner &&

@@ -62,6 +62,7 @@ namespace llvm {
 FunctionPass *createRogStripDeopt();
 FunctionPass *createRogQueryDeopt();
 FunctionPass *createRogGcReadDeopt();
+FunctionPass *createRogMarkersToDeopt();
 } // namespace llvm
 
 static cl::opt<bool>
@@ -1150,6 +1151,16 @@ void TargetPassConfig::addMachinePasses() {
 
   // Run pre-ra passes.
   addPreRegAlloc();
+
+  // ROG markers-only LOSSLESS path: convert $gcroot debug-value markers into
+  // statepoint deopt vreg operands here -- post-ISel (no DAG-scheduling pressure),
+  // before LiveDebugVariables strips the markers, and before RA. The existing
+  // RogStripDeopt/RogQueryDeopt (optimized-RA only) then resolve each vreg to its
+  // final RA-assigned location, which cannot degrade to $noreg the way a
+  // LiveDebugValues-reconstructed debug location can. Gated on optimized RA since
+  // the fast path has no strip/query; there the post-RA RogGcReadDeopt still runs.
+  if (getOptimizeRegAlloc())
+    addPass(createRogMarkersToDeopt());
 
   // Debugifying the register allocator passes seems to provoke some
   // non-determinism that affects CodeGen and there doesn't seem to be a point

@@ -1309,6 +1309,15 @@ bool MachineFunction::shouldUseDebugInstrRef() const {
   if (F.hasFnAttribute(Attribute::OptimizeNone))
     return false;
 
+  // ROG precise GC carries GC-root pointers via $gcroot dbg.value markers that a
+  // pre-RA pass (RogMarkersToDeopt) must resolve back to their vreg. Instr-ref
+  // encodes those as opaque instruction references that would require replicating
+  // the whole InstrRefBasedLDV value tracker to resolve; plain DBG_VALUE %vreg is
+  // directly usable. Disable instr-ref for rog functions (a small -O3 variable
+  // location precision tradeoff; line tables and GC correctness are unaffected).
+  if (F.hasGC() && F.getGC() == "rog")
+    return false;
+
   if (llvm::debuginfoShouldUseDebugInstrRef(getTarget().getTargetTriple()))
     return true;
 

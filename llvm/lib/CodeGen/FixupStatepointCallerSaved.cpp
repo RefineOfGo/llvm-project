@@ -29,6 +29,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LiveDebugVariables.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -1284,12 +1285,226 @@ public:
   }
 };
 char RogGcReadDeopt::ID = 0;
+
+// RogMarkersToDeopt (markers-only LOSSLESS path): pre-RA, before LiveDebugVariables
+// strips debug values, rewrite each direct single-vreg $gcroot marker into a plain
+// vreg deopt operand on its safepoint's STATEPOINT, then drop the marker. This feeds
+// the existing RogStripDeopt/RogQueryDeopt path (capture pre-RA vreg -> strip ->
+// RA -> resolve final location), which is LOSSLESS: register allocation must assign
+// every use a concrete location, so a live-across root can never degrade to $noreg
+// the way a LiveDebugValues-reconstructed debug location can (that degradation is the
+// markers-only correctness hole). Crucially the operand is added AFTER instruction
+// selection, so unlike the ISel-time operand path it imposes no DAG-scheduling
+// pressure -- the frame stays at the marker baseline while the location becomes
+// lossless. Only the direct single-vreg form is converted here; complex/indirect
+// markers are left in place for the post-RA RogGcReadDeopt (unchanged fallback).
+//
+// Scoping is positional: RogStackMap emits each marker immediately before its call,
+// so the markers seen since the previous statepoint are exactly the live-across roots
+// of the next safepoint. This mirrors the emitter's per-call liveAfter set and avoids
+// injecting a root into a later call it is not live across (a persistent Live map
+// cannot do this pre-RA, since LiveDebugValues -- the source of the $noreg scoping the
+// post-RA reader relies on -- has not run yet).
+class RogMarkersToDeopt : public MachineFunctionPass {
+public:
+  static char ID;
+  RogMarkersToDeopt() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override {
+    return "ROG markers -> statepoint deopt (pre-RA)";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    AU.addRequired<MachineDominatorTreeWrapperPass>();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    if (std::getenv("ROG_GC_DBG_DISABLE"))
+      return false; // legacy ISel operand path: no markers
+    if (std::getenv("ROG_GC_LIVE_DISABLE"))
+      return false; // fall back to the post-RA debug-value reader
+    const Function &F = MF.getFunction();
+    if (!F.hasGC() || F.getGC() != "rog")
+      return false;
+
+    MachineDominatorTree &DT =
+        getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+
+    auto isGcRoot = [](const DILocalVariable *V) {
+      return V && V->getName().starts_with("$gcroot");
+    };
+    // A GC root is either a virtual register holding the pointer (RA resolves it
+    // via strip/query) or a fixed stack slot (indirect memref, resolved by PEI).
+    struct Root {
+      bool isFI = false;
+      Register Reg;
+      int FI = 0;
+    };
+
+    // Debug instruction-number -> defining MI, to resolve DBG_INSTR_REF markers
+    // back to the vreg they name (isel emits most pointer roots as instr refs).
+    DenseMap<unsigned, MachineInstr *> InstrNumToMI;
+    for (MachineBasicBlock &MBB : MF)
+      for (MachineInstr &MI : MBB)
+        if (unsigned N = MI.peekDebugInstrNum())
+          InstrNumToMI[N] = &MI;
+
+    // Resolve a DBG_INSTR_REF (InstNo, OpNo) to its defining vreg, following the
+    // debug value-substitution table (records where a value's def moved during
+    // optimization). Subregister qualifiers are irrelevant for a non-moving GC:
+    // the full register that holds the pointer is scanned.
+    unsigned NMapMiss = 0, NNotDef = 0, NDomFail = 0;
+    auto resolveInstrRef = [&](unsigned InstNo, unsigned OpNo,
+                               const MachineInstr &Marker, Register &Out) -> bool {
+      auto Sought =
+          MachineFunction::DebugSubstitution({InstNo, OpNo}, {0, 0}, 0);
+      auto It = llvm::lower_bound(MF.DebugValueSubstitutions, Sought);
+      while (It != MF.DebugValueSubstitutions.end() && It->Src == Sought.Src) {
+        std::tie(InstNo, OpNo) = It->Dest;
+        Sought.Src = It->Dest;
+        It = llvm::lower_bound(MF.DebugValueSubstitutions, Sought);
+      }
+      auto MIIt = InstrNumToMI.find(InstNo);
+      if (MIIt == InstrNumToMI.end()) {
+        ++NMapMiss;
+        return false;
+      }
+      MachineInstr *Def = MIIt->second;
+      if (OpNo >= Def->getNumOperands()) {
+        ++NNotDef;
+        return false;
+      }
+      const MachineOperand &DefMO = Def->getOperand(OpNo);
+      if (!DefMO.isReg() || !DefMO.isDef() || !DefMO.getReg() ||
+          !DefMO.getReg().isVirtual()) {
+        ++NNotDef;
+        return false;
+      }
+      // The resolved def must dominate the marker (hence the safepoint just
+      // after it), or a use added at the statepoint would have no reaching def
+      // and crash RA -- a substitution can legitimately point at a def on a
+      // different control-flow path (e.g. a PHI input). Conservatively missing
+      // such a rare root is safe (the CSR scan still covers register roots);
+      // crashing is not.
+      if (!DT.dominates(Def, &Marker)) {
+        ++NDomFail;
+        return false;
+      }
+      Out = DefMO.getReg();
+      return true;
+    };
+
+    SmallVector<Root, 8> Pending;
+    SmallVector<MachineInstr *, 32> ToErase;
+    unsigned NConv = 0, NSP = 0, NUnres = 0;
+    bool Changed = false;
+
+    for (MachineBasicBlock &MBB : MF) {
+      for (MachineInstr &MI : MBB) {
+        unsigned Op = MI.getOpcode();
+        if (Op == TargetOpcode::DBG_VALUE || Op == TargetOpcode::DBG_VALUE_LIST ||
+            Op == TargetOpcode::DBG_INSTR_REF) {
+          if (!isGcRoot(MI.getDebugVariable()))
+            continue;
+          ToErase.push_back(&MI); // consumed here; keep it out of DWARF/reader
+          if (MI.getNumDebugOperands() != 1)
+            continue;
+          const MachineOperand &MO = MI.getDebugOperand(0);
+          Root Rt;
+          if (MO.isDbgInstrRef()) {
+            Register R;
+            if (resolveInstrRef(MO.getInstrRefInstrIndex(),
+                                MO.getInstrRefOpIndex(), MI, R)) {
+              Rt.Reg = R;
+              Pending.push_back(Rt);
+            } else {
+              ++NUnres;
+            }
+          } else if (MO.isReg() && MO.getReg() && MO.getReg().isVirtual() &&
+                     !(Op == TargetOpcode::DBG_VALUE &&
+                       MI.isIndirectDebugValue())) {
+            // The marker's vreg must have a def that dominates the marker (hence
+            // the safepoint), or a use added at the statepoint has no reaching
+            // def and crashes RA. A dbg.value can name a vreg not live here.
+            MachineInstr *Def = MRI.getVRegDef(MO.getReg());
+            if (Def && DT.dominates(Def, &MI)) {
+              Rt.Reg = MO.getReg();
+              Pending.push_back(Rt);
+            } else {
+              ++NDomFail;
+            }
+          } else if (MO.isFI()) {
+            Rt.isFI = true;
+            Rt.FI = MO.getIndex();
+            Pending.push_back(Rt);
+          }
+          continue;
+        }
+        if (Op != TargetOpcode::STATEPOINT)
+          continue;
+        ++NSP;
+        if (Pending.empty())
+          continue;
+        unsigned VI = StatepointOpers(&MI).getVarIdx();
+        if (VI + 5 >= MI.getNumOperands() || !MI.getOperand(VI + 5).isImm()) {
+          Pending.clear();
+          continue;
+        }
+        SmallSet<Register, 8> SeenReg;
+        SmallSet<int, 8> SeenFI;
+        SmallVector<MachineOperand, 16> NewOps;
+        unsigned Added = 0; // number of deopt LOCATIONS added (not operands)
+        for (const Root &Rt : Pending) {
+          if (!Rt.isFI) {
+            if (SeenReg.insert(Rt.Reg).second) {
+              NewOps.push_back(
+                  MachineOperand::CreateReg(Rt.Reg, /*isDef=*/false));
+              ++Added;
+            }
+          } else if (SeenFI.insert(Rt.FI).second) {
+            // Pointer in a fixed stack slot: emit the same indirect-memref quad
+            // the query pass uses for spilled roots. Strip preserves it, query
+            // re-emits it, PEI resolves the frame index to a frame-relative slot.
+            NewOps.push_back(
+                MachineOperand::CreateImm(StackMaps::IndirectMemRefOp));
+            NewOps.push_back(MachineOperand::CreateImm(8)); // pointer size
+            NewOps.push_back(MachineOperand::CreateFI(Rt.FI));
+            NewOps.push_back(MachineOperand::CreateImm(0));
+            ++Added;
+          }
+        }
+        if (Added) {
+          unsigned PrevDeopt = MI.getOperand(VI + 5).getImm();
+          MI.insert(MI.operands_begin() + (VI + 6), NewOps);
+          MI.getOperand(VI + 5).setImm(PrevDeopt + Added);
+          NConv += Added;
+          Changed = true;
+        }
+        Pending.clear();
+      }
+      Pending.clear(); // markers do not carry across block boundaries
+    }
+    for (MachineInstr *MI : ToErase) {
+      MI->eraseFromParent();
+      Changed = true;
+    }
+    if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NSP)
+      errs() << "[markers2deopt] " << MF.getName() << " sps=" << NSP
+             << " converted=" << NConv << " unresolved=" << NUnres
+             << " (mapmiss=" << NMapMiss << " notdef=" << NNotDef
+             << " domfail=" << NDomFail << ")\n";
+    return Changed;
+  }
+};
+char RogMarkersToDeopt::ID = 0;
 } // namespace
 
 namespace llvm {
 FunctionPass *createRogStripDeopt() { return new RogStripDeopt(); }
 FunctionPass *createRogQueryDeopt() { return new RogQueryDeopt(); }
 FunctionPass *createRogGcReadDeopt() { return new RogGcReadDeopt(); }
+FunctionPass *createRogMarkersToDeopt() { return new RogMarkersToDeopt(); }
 } // namespace llvm
 
 bool FixupStatepointCallerSavedImpl::run(MachineFunction &MF) {

@@ -1395,59 +1395,103 @@ public:
       return true;
     };
 
-    SmallVector<Root, 8> Pending;
+    // A marker is only ERASED once its root has actually been injected into a
+    // statepoint's deopt section. Any marker we cannot convert (unresolvable
+    // instr-ref, non-dominating def, physreg, multi-operand form) or that never
+    // reaches a statepoint (dangling at block end) is LEFT IN PLACE for the
+    // post-RA RogGcReadDeopt reader, which recovers a best-effort location and
+    // is backed by the conservative callee-saved scan. Silently dropping such a
+    // marker would delete the root entirely -- worse than the lossy baseline.
+    struct PendingRoot {
+      Root Rt;
+      MachineInstr *Marker;
+    };
+    SmallVector<PendingRoot, 8> Pending;
     SmallVector<MachineInstr *, 32> ToErase;
-    unsigned NConv = 0, NSP = 0, NUnres = 0;
+    unsigned NConv = 0, NSP = 0, NUnres = 0, NLeft = 0;
+    // Split of the markers left to the reader, to know what we still miss:
+    // multi-operand form, unresolvable instr-ref, non-dominating def, physreg /
+    // indirect / other operand form, dangling (no statepoint consumed them).
+    unsigned NLMulti = 0, NLInstrRef = 0, NLDom = 0, NLForm = 0, NLDangling = 0;
+    bool Diag = std::getenv("ROG_MARKERS_DIAG") != nullptr;
+    SmallVector<MachineInstr *, 16> SPs;
     bool Changed = false;
 
     for (MachineBasicBlock &MBB : MF) {
+      Pending.clear(); // markers do not carry across block boundaries
       for (MachineInstr &MI : MBB) {
         unsigned Op = MI.getOpcode();
         if (Op == TargetOpcode::DBG_VALUE || Op == TargetOpcode::DBG_VALUE_LIST ||
             Op == TargetOpcode::DBG_INSTR_REF) {
           if (!isGcRoot(MI.getDebugVariable()))
             continue;
-          ToErase.push_back(&MI); // consumed here; keep it out of DWARF/reader
-          if (MI.getNumDebugOperands() != 1)
-            continue;
-          const MachineOperand &MO = MI.getDebugOperand(0);
+          bool Resolved = false;
           Root Rt;
-          if (MO.isDbgInstrRef()) {
-            Register R;
-            if (resolveInstrRef(MO.getInstrRefInstrIndex(),
-                                MO.getInstrRefOpIndex(), MI, R)) {
-              Rt.Reg = R;
-              Pending.push_back(Rt);
+          if (MI.getNumDebugOperands() != 1) {
+            ++NLMulti;
+          } else {
+            const MachineOperand &MO = MI.getDebugOperand(0);
+            if (MO.isDbgInstrRef()) {
+              Register R;
+              if (resolveInstrRef(MO.getInstrRefInstrIndex(),
+                                  MO.getInstrRefOpIndex(), MI, R)) {
+                Rt.Reg = R;
+                Resolved = true;
+              } else {
+                ++NUnres;
+                ++NLInstrRef;
+                if (Diag)
+                  errs() << "[m2d-left] " << MF.getName() << " instr-ref"
+                         << " useInstrRef=" << MF.useDebugInstrRef() << "\n";
+              }
+            } else if (MO.isReg() && MO.getReg() && MO.getReg().isVirtual() &&
+                       !(Op == TargetOpcode::DBG_VALUE &&
+                         MI.isIndirectDebugValue())) {
+              // The marker's vreg must have a def that dominates the marker
+              // (hence the safepoint), or a use added at the statepoint has no
+              // reaching def and crashes RA. A dbg.value can name a vreg not
+              // live here.
+              MachineInstr *Def = MRI.getVRegDef(MO.getReg());
+              if (Def && DT.dominates(Def, &MI)) {
+                Rt.Reg = MO.getReg();
+                Resolved = true;
+              } else {
+                ++NDomFail;
+                ++NLDom;
+              }
+            } else if (MO.isFI()) {
+              Rt.isFI = true;
+              Rt.FI = MO.getIndex();
+              Resolved = true;
             } else {
-              ++NUnres;
+              ++NLForm;
+              if (Diag)
+                errs() << "[m2d-left] " << MF.getName() << " form op=" << Op
+                       << " kind="
+                       << (MO.isReg() ? (MO.getReg()
+                                             ? (MO.getReg().isVirtual() ? "vreg"
+                                                                        : "preg")
+                                             : "noreg")
+                                      : "other")
+                       << " indirect=" << MI.isIndirectDebugValue() << "\n";
             }
-          } else if (MO.isReg() && MO.getReg() && MO.getReg().isVirtual() &&
-                     !(Op == TargetOpcode::DBG_VALUE &&
-                       MI.isIndirectDebugValue())) {
-            // The marker's vreg must have a def that dominates the marker (hence
-            // the safepoint), or a use added at the statepoint has no reaching
-            // def and crashes RA. A dbg.value can name a vreg not live here.
-            MachineInstr *Def = MRI.getVRegDef(MO.getReg());
-            if (Def && DT.dominates(Def, &MI)) {
-              Rt.Reg = MO.getReg();
-              Pending.push_back(Rt);
-            } else {
-              ++NDomFail;
-            }
-          } else if (MO.isFI()) {
-            Rt.isFI = true;
-            Rt.FI = MO.getIndex();
-            Pending.push_back(Rt);
           }
+          if (Resolved)
+            Pending.push_back({Rt, &MI});
+          else
+            ++NLeft; // left for the post-RA reader
           continue;
         }
         if (Op != TargetOpcode::STATEPOINT)
           continue;
         ++NSP;
+        SPs.push_back(&MI);
         if (Pending.empty())
           continue;
         unsigned VI = StatepointOpers(&MI).getVarIdx();
         if (VI + 5 >= MI.getNumOperands() || !MI.getOperand(VI + 5).isImm()) {
+          // Malformed statepoint: leave the pending markers for the reader.
+          NLeft += Pending.size();
           Pending.clear();
           continue;
         }
@@ -1455,7 +1499,8 @@ public:
         SmallSet<int, 8> SeenFI;
         SmallVector<MachineOperand, 16> NewOps;
         unsigned Added = 0; // number of deopt LOCATIONS added (not operands)
-        for (const Root &Rt : Pending) {
+        for (const PendingRoot &P : Pending) {
+          const Root &Rt = P.Rt;
           if (!Rt.isFI) {
             if (SeenReg.insert(Rt.Reg).second) {
               NewOps.push_back(
@@ -1481,19 +1526,44 @@ public:
           NConv += Added;
           Changed = true;
         }
+        // Only markers whose roots were injected (or deduped into an injected
+        // location) are consumed; erase them so the reader does not double-track.
+        for (const PendingRoot &P : Pending)
+          ToErase.push_back(P.Marker);
         Pending.clear();
       }
-      Pending.clear(); // markers do not carry across block boundaries
+      // Dangling markers at block end (no statepoint consumed them): leave them
+      // for the post-RA reader.
+      NLeft += Pending.size();
+      NLDangling += Pending.size();
     }
     for (MachineInstr *MI : ToErase) {
       MI->eraseFromParent();
       Changed = true;
     }
+    // Any marker we could NOT convert means this function's precise records
+    // under-approximate its live roots (the post-RA reader is best-effort
+    // only). Mark every safepoint of the function "incomplete" by setting bit
+    // 63 of its statepoint ID: the ID travels into the stackmap record's
+    // patchpoint-id field, where the runtime sees the bit and scans such
+    // frames fully conservatively instead of trusting the precise record.
+    // Functions with no leftover markers (the common case) keep bit 63 clear
+    // and are scanned precisely.
+    if (NLeft)
+      for (MachineInstr *SP : SPs) {
+        StatepointOpers SO(SP);
+        uint64_t ID = SO.getID();
+        SP->getOperand(SO.getIDPos()).setImm(ID | (1ULL << 63));
+        Changed = true;
+      }
     if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NSP)
       errs() << "[markers2deopt] " << MF.getName() << " sps=" << NSP
-             << " converted=" << NConv << " unresolved=" << NUnres
-             << " (mapmiss=" << NMapMiss << " notdef=" << NNotDef
-             << " domfail=" << NDomFail << ")\n";
+             << " converted=" << NConv << " left=" << NLeft
+             << " [multi=" << NLMulti << " iref=" << NLInstrRef
+             << " dom=" << NLDom << " form=" << NLForm
+             << " dangling=" << NLDangling << "]"
+             << " irefdetail(mapmiss=" << NMapMiss << " notdef=" << NNotDef
+             << ")\n";
     return Changed;
   }
 };

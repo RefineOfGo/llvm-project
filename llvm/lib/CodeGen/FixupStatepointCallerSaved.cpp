@@ -944,6 +944,7 @@ public:
              NMMOFallbackSlots = 0, NMiss = 0, NMissStale = 0,
              NMissResurrect = 0, NMissTrueDead = 0, NMissLiveNoLoc = 0,
              NTotal = 0, NIncompleteSPs = 0;
+    bool FnIncomplete = false;
     bool Changed = false;
     for (MachineBasicBlock &BB : MF) {
       for (MachineInstr &MI : BB) {
@@ -1150,10 +1151,25 @@ public:
           StatepointOpers SO(&MI);
           MI.getOperand(SO.getIDPos()).setImm(SO.getID() | (1ULL << 63));
           ++NIncompleteSPs;
+          FnIncomplete = true;
           Changed = true;
         }
       }
     }
+    // Gate granularity: by default any dangerous miss marks EVERY statepoint
+    // of the function. The tempting per-safepoint narrowing ("a miss is a
+    // property of (safepoint, root); other safepoints resolve or mark
+    // themselves") is UNSOUND -- measured on vendor smx509 under GOGC=1 the
+    // operand path is clean per-function (0/6) but crashes per-safepoint
+    // (3/3). The exact counterexample is still to be characterized; keep the
+    // narrowing as an opt-in experiment (ROG_INCOMPLETE_PER_SP) until it is.
+    if (FnIncomplete && !std::getenv("ROG_INCOMPLETE_PER_SP"))
+      for (MachineBasicBlock &BB : MF)
+        for (MachineInstr &MI : BB)
+          if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+            StatepointOpers SO(&MI);
+            MI.getOperand(SO.getIDPos()).setImm(SO.getID() | (1ULL << 63));
+          }
     if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NTotal)
       errs() << "[query-deopt] " << MF.getName() << " total=" << NTotal
              << " reg=" << NReg << " (preserved=" << NRegPreserved
@@ -1581,6 +1597,9 @@ public:
             Pending.push_back({Rt, &MI});
           else
             ++NLeft; // left for the post-RA reader
+          if (const char *DumpPat = std::getenv("ROG_M2D_DUMP"))
+            if (MF.getName().contains(DumpPat))
+              errs() << "[m2d-mi] " << (Resolved ? "OK  " : "LEFT") << MI;
           continue;
         }
         if (Op != TargetOpcode::STATEPOINT)

@@ -59,10 +59,7 @@ using namespace llvm;
 
 namespace llvm {
 // ROG strip-deopt spike (defined in FixupStatepointCallerSaved.cpp).
-FunctionPass *createRogStripDeopt();
 FunctionPass *createRogQueryDeopt();
-FunctionPass *createRogGcReadDeopt();
-FunctionPass *createRogMarkersToDeopt();
 } // namespace llvm
 
 static cl::opt<bool>
@@ -1152,16 +1149,6 @@ void TargetPassConfig::addMachinePasses() {
   // Run pre-ra passes.
   addPreRegAlloc();
 
-  // ROG markers-only LOSSLESS path: convert $gcroot debug-value markers into
-  // statepoint deopt vreg operands here -- post-ISel (no DAG-scheduling pressure),
-  // before LiveDebugVariables strips the markers, and before RA. The existing
-  // RogStripDeopt/RogQueryDeopt (optimized-RA only) then resolve each vreg to its
-  // final RA-assigned location, which cannot degrade to $noreg the way a
-  // LiveDebugValues-reconstructed debug location can. Gated on optimized RA since
-  // the fast path has no strip/query; there the post-RA RogGcReadDeopt still runs.
-  if (getOptimizeRegAlloc())
-    addPass(createRogMarkersToDeopt());
-
   // Debugifying the register allocator passes seems to provoke some
   // non-determinism that affects CodeGen and there doesn't seem to be a point
   // where it becomes safe again so stop debugifying here.
@@ -1255,10 +1242,6 @@ void TargetPassConfig::addMachinePasses() {
   addPass(&RemoveLoadsIntoFakeUsesID);
   addPass(&StackMapLivenessID);
   addPass(&LiveDebugValuesID);
-  // ROG precise-GC debug-value reader: after LiveDebugValues has resolved the
-  // $gcroot markers to physical locations, inject the spill-slot roots into the
-  // statepoint deopt section (gated by ROG_GC_DBG_READ). No-op otherwise.
-  addPass(createRogGcReadDeopt());
   addPass(&MachineSanitizerBinaryMetadataID);
 
   if (TM->Options.EnableMachineOutliner &&
@@ -1467,20 +1450,15 @@ bool TargetPassConfig::addRegAssignAndRewriteFast() {
 }
 
 bool TargetPassConfig::addRegAssignAndRewriteOptimized() {
-  // ROG precise GC: strip statepoint deopt operands after coalescing /
-  // scheduling (so captured vregs are the final pre-RA names) but right before
-  // greedy, so RA sees a plain call (no operand pressure).
-  addPass(llvm::createRogStripDeopt());
-
   // Add the selected register allocation pass.
   addPass(createRegAllocPass(true));
 
   // Allow targets to change the register assignments before rewriting.
   addPreRewrite();
 
-  // ROG precise GC: resolve captured deopt vregs to their final locations while
-  // VirtRegMap + LiveIntervals are live and vregs are not yet rewritten, and
-  // re-inject the stack-slot roots as deopt operands for stack-map emission.
+  // ROG precise GC: record the live spill slots of every statepoint into its
+  // deopt section (slot-liveness stack maps) while LiveIntervals/LiveStacks
+  // are valid and vregs are not yet rewritten.
   addPass(llvm::createRogQueryDeopt());
 
   // Finally rewrite virtual registers.

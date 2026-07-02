@@ -748,10 +748,22 @@ public:
     // which is exactly what relieves RA pressure. Do not remove intervals here
     // even when only debug users remain; LiveDebugVariables may still inspect
     // them and can lower now-unavailable debug values to undef on its own.
-    for (Register V : Affected) {
-      if (LIS.hasInterval(V))
-        LIS.shrinkToUses(&LIS.getInterval(V));
-    }
+    //
+    // Experiment (ROG_STRIP_NO_SHRINK): keep the pre-strip live ranges so RA
+    // must keep every root addressable across its calls (no dead-at-safepoint
+    // misses). RESULT (2026-07-02): does not work as-is -- greedy's
+    // SplitAnalysis asserts ("range ends mid block with no uses",
+    // SplitKit.cpp:229) on ranges with no anchoring use. The sibling
+    // experiment (ROG_DISABLE_PRECISE_DEOPT, keeping the operands on the
+    // statepoint through RA) dies too: large root sets exhaust the allocator
+    // ("ran out of registers", e.g. json fallback.typeFields). A real
+    // keep-alive path needs statepoint spill semantics (pre-RA fixed slots),
+    // not just longer ranges. Kept for reference.
+    if (!std::getenv("ROG_STRIP_NO_SHRINK"))
+      for (Register V : Affected) {
+        if (LIS.hasInterval(V))
+          LIS.shrinkToUses(&LIS.getInterval(V));
+      }
 
     if (std::getenv("ROG_STRIP_DEOPT_DEBUG"))
       errs() << "[strip-deopt] " << MF.getName() << " statepoints=" << SPs.size()
@@ -902,11 +914,36 @@ public:
       return false;
     };
 
+    // Does the value RESURRECT after S -- i.e. some candidate in the vreg
+    // lineage has a live segment beginning after the safepoint (a remat /
+    // re-materialized definition)? A dead-at-S root that resurrects is NOT
+    // program-dead: the register allocator merely chose not to keep it live
+    // across the call (our strip removed the use that would have forced it),
+    // and will recompute it afterwards. Between the call and the recompute the
+    // object may have no recorded reference at all -- the reedsolomon
+    // use-after-free. A dead-at-S root with NO later segment anywhere in its
+    // lineage (and no spill slot, or resolve() would have returned it) is
+    // genuinely dead: no code will ever read the value again, so dropping it
+    // is safe.
+    auto resurrectsAfterS = [&](Register Orig, SlotIndex S) -> bool {
+      SmallVector<Register, 8> Cands;
+      collectCandidates(Orig, Cands);
+      for (Register C : Cands) {
+        if (!LIS.hasInterval(C))
+          continue;
+        for (const LiveRange::Segment &Seg : LIS.getInterval(C))
+          if (Seg.start > S)
+            return true;
+      }
+      return false;
+    };
+
     unsigned NReg = 0, NRegPreserved = 0, NRegClobbered = 0, NRegSpilled = 0,
              NSlot = 0, NObjectFallbacks = 0,
              NObjectFallbackSlots = 0, NMMOFallbacks = 0,
              NMMOFallbackSlots = 0, NMiss = 0, NMissStale = 0,
-             NMissDeadAtS = 0, NMissLiveNoLoc = 0, NTotal = 0;
+             NMissResurrect = 0, NMissTrueDead = 0, NMissLiveNoLoc = 0,
+             NTotal = 0, NIncompleteSPs = 0;
     bool Changed = false;
     for (MachineBasicBlock &BB : MF) {
       for (MachineInstr &MI : BB) {
@@ -921,12 +958,29 @@ public:
         SmallVector<int, 8> SlotFIs; // stack slots to record at this safepoint
         SmallSet<unsigned, 8> LateSpilledRegIds;
         bool NeedsObjectFallback = false;
+        // Set when a root of THIS safepoint is dangerously unresolvable (stale
+        // lineage / live-without-location / dead-but-resurrects); marks only
+        // this statepoint incomplete (bit 63 of its ID) so the runtime scans
+        // this frame conservatively only when the GC stops here.
+        bool SPIncomplete = false;
+        const char *QDiagPat = std::getenv("ROG_M2D_FN");
+        bool QDiag = QDiagPat && MF.getName().contains(QDiagPat);
         for (Register Orig : Info.Captured) {
           ++NTotal;
           int FI;
           MCRegister Phys;
           bool RegPreserved;
-          switch (resolve(Orig, S, MI, FI, Phys, RegPreserved)) {
+          int Res = resolve(Orig, S, MI, FI, Phys, RegPreserved);
+          if (QDiag)
+            errs() << "[q-sp] " << MF.getName()
+                   << " id=" << StatepointOpers(&MI).getID() << " "
+                   << printReg(Orig) << " -> "
+                   << (Res == 1 ? (RegPreserved ? "reg-preserved" : "reg-clobbered")
+                       : Res == 2 ? "slot"
+                                  : "MISS")
+                   << (Res == 2 ? (" FI=" + std::to_string(FI)) : std::string())
+                   << "\n";
+          switch (Res) {
           case 1:
             ++NReg;
             if (RegPreserved)
@@ -934,7 +988,11 @@ public:
             else {
               ++NRegClobbered;
             }
-            if (!RegPreserved) {
+            // Diagnostic (ROG_SPILL_PRESERVED): also spill call-preserved
+            // register roots into recorded slots instead of relying on the
+            // runtime's conservative callee-saved recovery chain -- isolates
+            // whether that chain is the source of missed roots.
+            if (!RegPreserved || std::getenv("ROG_SPILL_PRESERVED")) {
               int SpillFI = getLateSpillSlot(Phys);
               if (LateSpilledRegIds.insert(Phys.id()).second) {
                 const TargetRegisterClass *RC = TRI.getMinimalPhysRegClass(Phys);
@@ -966,14 +1024,33 @@ public:
             for (Register C : Cands)
               seen(C);
             if (!anyPresence) {
+              // Whole lineage renamed away (coalescing): the handle is lost
+              // and nothing can be proven about the value -- dangerous.
               ++NMissStale;
               NeedsObjectFallback = true;
+              SPIncomplete = true;
             } else if (liveAtS(Orig, S)) {
               ++NMissLiveNoLoc; // live at S but no resolvable location (bug?)
               NeedsObjectFallback = true;
-            } else {
-              ++NMissDeadAtS;
+              SPIncomplete = true;
+            } else if (resurrectsAfterS(Orig, S)) {
+              // Dead at S but re-defined later (remat): the value is NOT
+              // program-dead, RA just chose not to keep it across the call.
+              // Between the call and the recompute the object may be entirely
+              // unreferenced -- the reedsolomon use-after-free class.
+              ++NMissResurrect;
               NeedsObjectFallback = true;
+              SPIncomplete = true;
+            } else {
+              // No location, no spill slot, and no later definition anywhere
+              // in the LINEAGE (Orig + split descendants). NOT yet provably
+              // dead: the value may live on through a COPY into a different
+              // lineage that collectCandidates cannot see. Experiment knob
+              // ROG_TRUEDEAD_EXEMPT drops these without marking (unsound until
+              // copy-chasing is implemented); default marks them.
+              ++NMissTrueDead;
+              if (!std::getenv("ROG_TRUEDEAD_EXEMPT"))
+                SPIncomplete = true;
             }
             break;
           }
@@ -1053,6 +1130,28 @@ public:
                                        DirectObjectFIs.size() * 2);
           Changed = true;
         }
+        // Second incomplete gate (the first is RogMarkersToDeopt's, for
+        // markers it could not convert): a dangerously unresolvable root at
+        // THIS safepoint -- a stale handle renamed away across RA, a value
+        // live without a location, or one that is dead here but resurrects
+        // (rematerialized) afterwards -- means this safepoint's precise
+        // record under-approximates the frame's live roots. The object
+        // fallback meant to cover these is opt-in (ROG_OBJECT_FALLBACK_ON_MISS,
+        // off by default), which left such roots with no recovery path at all
+        // (reproduced as GC use-after-free: vendor reedsolomon TestEncoding).
+        // Mark bit 63 of this statepoint's ID; the runtime scans the frame
+        // conservatively only when the GC stops at this safepoint. Provably
+        // true-dead roots (no location, no slot, no later definition) are
+        // dropped without marking. This gate is per-safepoint, unlike the
+        // marker gate: a miss is a property of (safepoint, root) -- the same
+        // root at other safepoints either resolves or marks those safepoints
+        // itself.
+        if (SPIncomplete) {
+          StatepointOpers SO(&MI);
+          MI.getOperand(SO.getIDPos()).setImm(SO.getID() | (1ULL << 63));
+          ++NIncompleteSPs;
+          Changed = true;
+        }
       }
     }
     if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NTotal)
@@ -1065,8 +1164,10 @@ public:
              << " object_fallbacks=" << NObjectFallbacks
              << " object_slots=" << NObjectFallbackSlots
              << " miss=" << NMiss
-             << " (stale=" << NMissStale << " deadAtS=" << NMissDeadAtS
-             << " liveNoLoc=" << NMissLiveNoLoc << ")\n";
+             << " (stale=" << NMissStale << " resurrect=" << NMissResurrect
+             << " truedead=" << NMissTrueDead
+             << " liveNoLoc=" << NMissLiveNoLoc
+             << ") incomplete_sps=" << NIncompleteSPs << "\n";
     return Changed;
   }
 };
@@ -1486,8 +1587,14 @@ public:
           continue;
         ++NSP;
         SPs.push_back(&MI);
-        if (Pending.empty())
+        if (Pending.empty()) {
+          if (const char *FnPat = std::getenv("ROG_M2D_FN"))
+            if (MF.getName().contains(FnPat))
+              errs() << "[m2d-sp] " << MF.getName()
+                     << " id=" << StatepointOpers(&MI).getID()
+                     << " pending=0 (empty)\n";
           continue;
+        }
         unsigned VI = StatepointOpers(&MI).getVarIdx();
         if (VI + 5 >= MI.getNumOperands() || !MI.getOperand(VI + 5).isImm()) {
           // Malformed statepoint: leave the pending markers for the reader.
@@ -1526,6 +1633,17 @@ public:
           NConv += Added;
           Changed = true;
         }
+        if (const char *FnPat = std::getenv("ROG_M2D_FN"))
+          if (MF.getName().contains(FnPat)) {
+            errs() << "[m2d-sp] " << MF.getName()
+                   << " id=" << StatepointOpers(&MI).getID()
+                   << " pending=" << Pending.size() << " added=" << Added
+                   << " regs={";
+            for (const PendingRoot &P : Pending)
+              if (!P.Rt.isFI)
+                errs() << " " << printReg(P.Rt.Reg);
+            errs() << " }\n";
+          }
         // Only markers whose roots were injected (or deduped into an injected
         // location) are consumed; erase them so the reader does not double-track.
         for (const PendingRoot &P : Pending)

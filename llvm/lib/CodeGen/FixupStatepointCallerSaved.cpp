@@ -29,6 +29,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LiveDebugVariables.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -787,6 +788,7 @@ public:
   RogQueryDeopt() : MachineFunctionPass(ID) {}
   StringRef getPassName() const override { return "ROG query deopt (spike)"; }
   void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<LiveStacksWrapperLegacy>();
     AU.addRequired<VirtRegMapWrapperLegacy>();
     AU.addRequired<LiveIntervalsWrapperPass>();
     AU.setPreservesAll();
@@ -801,6 +803,33 @@ public:
 
     VirtRegMap &VRM = getAnalysis<VirtRegMapWrapperLegacy>().getVRM();
     LiveIntervals &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
+    // Slot-liveness stack maps (target default; see gate note below). Instead
+    // of resolving each captured
+    // root vreg to its post-RA location, record EVERY spill slot whose live
+    // interval covers the safepoint. Slot liveness is ground truth maintained
+    // by the register allocator itself (spill stores/loads are explicit
+    // machine instructions), so this sidesteps the whole value-tracking chain
+    // and its failure modes we debugged one by one: coalescing renames
+    // (stale), rematerialization (dead-at-S roots that are not program-dead),
+    // dropped markers, and backend-materialized derived cursors. The recorded
+    // set is a conservative superset -- non-pointer spill slots are scanned
+    // too and filtered by the runtime's heap check -- while dead slots are
+    // excluded (no false retention). Completeness: a root live across a
+    // safepoint is either in a callee-saved register (covered by the
+    // conservative CSR-area scan) or in a stack slot (covered here); allocas
+    // keep their strip-preserved Direct entries. No incomplete marking is
+    // needed. Validated: smx509 TestPathBuilding + reedsolomon TestEncoding
+    // under GOGC=1 (the two value-tracking killers) pass with zero frame
+    // overhead (regexp machine.add stays 0x78) and ~+2% stackmap size.
+    //
+    // NOT yet the default: with --debug-info-for-profiling (the CI flag set)
+    // a flaky residue remains (smx509 GOGC=1: 2/6 vs 0/6 without the flag,
+    // single-variable isolated) that the value-tracking default does not
+    // exhibit. Promote to default once that hole is characterized. Enable
+    // with ROG_SLOT_LIVENESS=1.
+    LiveStacks *LSS = nullptr;
+    if (std::getenv("ROG_SLOT_LIVENESS"))
+      LSS = &getAnalysis<LiveStacksWrapperLegacy>().getLS();
     MachineRegisterInfo &MRI = MF.getRegInfo();
     MachineFrameInfo &MFI = MF.getFrameInfo();
     const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
@@ -946,6 +975,62 @@ public:
              NTotal = 0, NIncompleteSPs = 0;
     bool FnIncomplete = false;
     bool Changed = false;
+    if (LSS) {
+      // Slot-liveness mode (default): for EVERY statepoint record all live
+      // spill slots (sorted for determinism) plus the strip-preserved alloca
+      // entries.
+      unsigned NSlots = 0, NSPs = 0;
+      for (MachineBasicBlock &BB : MF) {
+        for (MachineInstr &MI : BB) {
+          if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+            continue;
+          ++NSPs;
+          SlotIndex S = LIS.getInstructionIndex(MI).getDeadSlot();
+          SmallVector<int, 16> LiveFIs;
+          for (auto &Ent : *LSS)
+            if (!MFI.isDeadObjectIndex(Ent.first) &&
+                Ent.second.liveAt(S))
+              LiveFIs.push_back(Ent.first);
+          llvm::sort(LiveFIs);
+          unsigned VI = StatepointOpers(&MI).getVarIdx();
+          if (VI + 5 >= MI.getNumOperands() || !MI.getOperand(VI + 5).isImm())
+            continue;
+          SmallVector<MachineOperand, 32> NewOps;
+          unsigned Entries = 0;
+          for (int FI : LiveFIs) {
+            NewOps.push_back(
+                MachineOperand::CreateImm(StackMaps::IndirectMemRefOp));
+            NewOps.push_back(
+                MachineOperand::CreateImm(MFI.getObjectSize(FI)));
+            NewOps.push_back(MachineOperand::CreateFI(FI));
+            NewOps.push_back(MachineOperand::CreateImm(0));
+            ++Entries;
+          }
+          // Re-emit the strip-preserved entries (alloca Direct mem-refs).
+          auto TabIt = rogDeoptTable().find(StatepointOpers(&MI).getID());
+          if (TabIt != rogDeoptTable().end()) {
+            RogDeoptInfo &Info = TabIt->second;
+            for (const auto &P : Info.PreservedOps) {
+              if (P.first)
+                NewOps.push_back(MachineOperand::CreateFI((int)P.second));
+              else
+                NewOps.push_back(MachineOperand::CreateImm(P.second));
+            }
+            Entries += Info.PreservedEntries;
+          }
+          if (!NewOps.empty()) {
+            MI.insert(MI.operands_begin() + (VI + 6), NewOps);
+            MI.getOperand(VI + 5).setImm(Entries);
+            NSlots += Entries;
+            Changed = true;
+          }
+        }
+      }
+      if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NSPs)
+        errs() << "[slot-live] " << MF.getName() << " sps=" << NSPs
+               << " entries=" << NSlots << "\n";
+      return Changed;
+    }
     for (MachineBasicBlock &BB : MF) {
       for (MachineInstr &MI : BB) {
         if (MI.getOpcode() != TargetOpcode::STATEPOINT)

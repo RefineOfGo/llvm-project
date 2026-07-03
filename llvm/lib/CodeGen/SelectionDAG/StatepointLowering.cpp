@@ -661,6 +661,33 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
       if (FI != INT_MAX)
         Incoming = Builder.DAG.getFrameIndex(FI, Builder.getFrameIndexTy());
     }
+    // ROG precise GC: a deopt root that is a zero-net-offset constant GEP
+    // chain over a static alloca must lower to the frame index directly.
+    // The RogStackMap emitter only records alloca roots, but codegen IR
+    // passes running after it -- notably LoopStrengthReduce, which precedes
+    // CodeGenPrepare -- can RAUW a statepoint's alloca operand into an
+    // equivalent round-trip GEP (e.g. +32/-32). getValue() on that GEP
+    // misses the StaticAllocaMap shortcut and materializes the address into
+    // a cross-block vreg: a use-at-statepoint interval overlapping the
+    // call's regmask that can only take a callee-saved register. Under
+    // pressure greedy RA has none left and fails with "ran out of registers"
+    // (skipmap StringMap.LoadOrStoreLazy under ThinLTO). Recovering the
+    // frame index here keeps such roots at zero register cost regardless of
+    // what later IR passes did to the operand's syntactic form.
+    if (!Incoming.getNode() && V->getType()->isPointerTy()) {
+      const DataLayout &DL = Builder.DAG.getDataLayout();
+      APInt Offset(DL.getIndexTypeSizeInBits(V->getType()), 0);
+      const Value *Base =
+          V->stripAndAccumulateConstantOffsets(DL, Offset,
+                                               /*AllowNonInbounds=*/true);
+      if (Offset.isZero())
+        if (const auto *AI = dyn_cast<AllocaInst>(Base)) {
+          auto It = Builder.FuncInfo.StaticAllocaMap.find(AI);
+          if (It != Builder.FuncInfo.StaticAllocaMap.end())
+            Incoming =
+                Builder.DAG.getFrameIndex(It->second, Builder.getFrameIndexTy());
+        }
+    }
     if (!Incoming.getNode())
       Incoming = Builder.getValue(V);
     LLVM_DEBUG(dbgs() << "Value " << *V

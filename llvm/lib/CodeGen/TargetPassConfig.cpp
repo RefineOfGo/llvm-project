@@ -60,6 +60,7 @@ using namespace llvm;
 namespace llvm {
 // ROG strip-deopt spike (defined in FixupStatepointCallerSaved.cpp).
 FunctionPass *createRogQueryDeopt();
+FunctionPass *createRogZeroDeadCSR();
 } // namespace llvm
 
 static cl::opt<bool>
@@ -1240,6 +1241,12 @@ void TargetPassConfig::addMachinePasses() {
   addPass(&FuncletLayoutID);
 
   addPass(&RemoveLoadsIntoFakeUsesID);
+
+  // ROG precise GC: zero dead callee-saved registers before statepoints so
+  // dead GC pointers do not ride callee CSR save areas (which the runtime
+  // scans conservatively) and pin their objects while a frame is suspended.
+  addPass(llvm::createRogZeroDeadCSR());
+
   addPass(&StackMapLivenessID);
   addPass(&LiveDebugValuesID);
   addPass(&MachineSanitizerBinaryMetadataID);

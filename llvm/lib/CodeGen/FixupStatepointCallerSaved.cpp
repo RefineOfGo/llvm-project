@@ -29,6 +29,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LiveDebugVariables.h"
 #include "llvm/CodeGen/LiveIntervals.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -702,10 +703,128 @@ char RogQueryDeopt::ID = 0;
 
 // ===========================================================================
 
+// ROG precise GC: zero dead callee-saved registers right before every
+// statepoint. The runtime cannot see types in CSR save areas, so it scans
+// them conservatively (collector.rs walk_frames). A GC pointer whose value is
+// dead but still sitting in a callee-saved register gets spilled into every
+// callee frame's CSR area below the statepoint and conservatively retains its
+// object for as long as the frame is suspended -- a goroutine parked on a
+// channel receive keeps the dead pointer alive across every GC cycle, which
+// inverts weak/cleanup semantics (weak.Pointer never goes nil, cleanups never
+// run: the wait itself pins the object being waited on).
+//
+// Fix at the source: for each statepoint, clear the CSRs that this function
+// saves (its prologue spilled the caller's values, so the register itself is
+// scratch until the epilogue restores it) and that hold no live value at the
+// statepoint. Liveness is computed with a backward LivePhysRegs sweep, so a
+// register is only cleared when it has no reader before its epilogue restore.
+// Runs after PEI (CalleeSavedInfo is final, all registers are physical) and
+// before StackMapLiveness/AsmPrinter, where STATEPOINT still exists.
+class RogZeroDeadCSR : public MachineFunctionPass {
+public:
+  static char ID;
+  RogZeroDeadCSR() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override {
+    return "ROG zero dead callee-saved registers at statepoints";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    if (std::getenv("ROG_DISABLE_ZERO_DEAD_CSR"))
+      return false;
+    const Function &F = MF.getFunction();
+    if (!F.hasGC() || F.getGC() != "rog")
+      return false;
+    const MachineFrameInfo &MFI = MF.getFrameInfo();
+    if (!MFI.isCalleeSavedInfoValid())
+      return false;
+    const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+    const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    const BitVector Reserved = TRI->getReservedRegs(MF);
+    // Only registers this function saves are scratch; anything else still
+    // carries the caller's value. Restrict to general-purpose registers: a
+    // GC pointer never lives in a vector register, and clearing e.g. CSR
+    // XMMs on win64-style CSRs would be wasted work.
+    SmallVector<Register, 8> Saved;
+    for (const CalleeSavedInfo &CSI : MFI.getCalleeSavedInfo()) {
+      Register R = CSI.getReg();
+      if (!Reserved.test(R.id()) &&
+          TRI->isGeneralPurposeRegister(MF, R.asMCReg()))
+        Saved.push_back(R);
+    }
+    if (Saved.empty())
+      return false;
+    // Status-flags register, resolved by name so this stays
+    // target-independent (x86 EFLAGS; other targets simply find nothing and
+    // keep the flag-safe MOV form).
+    MCRegister FlagsReg;
+    for (unsigned i = 1, e = TRI->getNumRegs(); i != e; ++i)
+      if (StringRef(TRI->getName(i)) == "EFLAGS") {
+        FlagsReg = i;
+        break;
+      }
+    bool Changed = false;
+    unsigned NCleared = 0, NSPs = 0, NFlagsLive = 0;
+    SmallVector<std::tuple<MachineInstr *, Register, bool>, 16> Clears;
+    for (MachineBasicBlock &MBB : MF) {
+      bool HasSP = false;
+      for (MachineInstr &MI : MBB)
+        if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+          HasSP = true;
+          break;
+        }
+      if (!HasSP)
+        continue;
+      LivePhysRegs LiveRegs(*TRI);
+      // NoPristines: PEI marks every saved CSR pristine-live, which would
+      // veto exactly the registers we want to clear. The epilogue restore is
+      // a def, so the backward sweep correctly ends a dead register's range
+      // at its reload.
+      LiveRegs.addLiveOutsNoPristines(MBB);
+      for (MachineInstr &MI : llvm::reverse(MBB)) {
+        LiveRegs.stepBackward(MI); // now = liveness just before MI
+        if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+          continue;
+        ++NSPs;
+        // XOR (the cheap zeroing idiom) clobbers the status flags, so it is
+        // only used when they are provably dead right before the call;
+        // otherwise fall back to MOV reg, 0. Flags are almost always dead
+        // here -- a flags consumer past a call cannot exist (the call
+        // clobbers them) -- but "almost" is measured, not assumed.
+        bool FlagsDead = FlagsReg && !LiveRegs.contains(FlagsReg);
+        if (!FlagsDead)
+          ++NFlagsLive;
+        for (Register R : Saved)
+          if (LiveRegs.available(MRI, R.asMCReg()))
+            Clears.emplace_back(&MI, R, FlagsDead);
+      }
+    }
+    for (auto &[MI, R, FlagsDead] : Clears) {
+      DebugLoc DL = MI->getDebugLoc();
+      TII->buildClearRegister(R, *MI->getParent(), MI->getIterator(), DL,
+                              /*AllowSideEffects=*/FlagsDead);
+      ++NCleared;
+      Changed = true;
+    }
+    if (std::getenv("ROG_STRIP_DEOPT_DEBUG") && NSPs)
+      errs() << "[zero-csr] " << MF.getName() << " sps=" << NSPs
+             << " cleared=" << NCleared << " flagslive=" << NFlagsLive
+             << "\n";
+    return Changed;
+  }
+};
+char RogZeroDeadCSR::ID = 0;
+
+// ===========================================================================
+
 } // namespace
 
 namespace llvm {
 FunctionPass *createRogQueryDeopt() { return new RogQueryDeopt(); }
+FunctionPass *createRogZeroDeadCSR() { return new RogZeroDeadCSR(); }
 } // namespace llvm
 
 bool FixupStatepointCallerSavedImpl::run(MachineFunction &MF) {

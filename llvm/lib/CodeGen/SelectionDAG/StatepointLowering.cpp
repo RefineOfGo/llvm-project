@@ -350,12 +350,45 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
     CallEnd = CallEnd->getOperand(0).getNode();
 
   bool HasDef = !SI.CLI.RetTy->isVoidTy();
-  if (HasDef) {
-    if (CallEnd->getOpcode() == ISD::LOAD)
-      CallEnd = CallEnd->getOperand(0).getNode();
-    else
-      while (CallEnd->getOpcode() == ISD::CopyFromReg)
-        CallEnd = CallEnd->getOperand(0).getNode();
+  if (HasDef && CallEnd->getOpcode() != ISD::CALLSEQ_END) {
+    // The get_return_value shape depends on how the return value reaches us:
+    // a chain of CopyFromReg nodes (multi-register returns, including
+    // aggregates split over several return registers), a single LOAD (a
+    // value returned by reference via a stack slot), a TokenFactor joining
+    // the chains of several such loads/copies (aggregates demoted to memory
+    // field by field), or target-specific plumbing such as
+    // X86ISD::POP_FROM_X87_REG for x87 floating-point returns. All of them
+    // thread the call sequence's chain through operand 0, so follow any node
+    // whose first operand is a chain; a node without one ends that path, so
+    // an unrelated value entering the walk cannot lead us to some earlier
+    // call's CALLSEQ_END.
+    SmallVector<SDNode *, 8> Worklist{CallEnd};
+    SmallPtrSet<SDNode *, 8> Visited;
+    SDNode *Found = nullptr;
+    while (!Worklist.empty()) {
+      SDNode *N = Worklist.pop_back_val();
+      if (!Visited.insert(N).second)
+        continue;
+      if (N->getOpcode() == ISD::CALLSEQ_END) {
+        Found = N;
+        break;
+      }
+      if (N->getOpcode() == ISD::TokenFactor) {
+        for (const SDValue &Op : N->op_values())
+          Worklist.push_back(Op.getNode());
+        continue;
+      }
+      if (N->getNumOperands() > 0 &&
+          N->getOperand(0).getValueType() == MVT::Other)
+        Worklist.push_back(N->getOperand(0).getNode());
+    }
+    if (Found)
+      CallEnd = Found;
+    else {
+      errs() << "rog-statepoint: CALLSEQ_END walk failed in "
+             << Builder.FuncInfo.Fn->getName() << "; return-value tail:\n";
+      CallEndVal.getNode()->printrWithDepth(errs(), &Builder.DAG, 5);
+    }
   }
 
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");

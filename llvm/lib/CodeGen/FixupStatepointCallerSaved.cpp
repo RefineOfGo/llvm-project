@@ -688,7 +688,32 @@ public:
           NewOps.push_back(MachineOperand::CreateFI(FI));
           NewOps.push_back(MachineOperand::CreateImm(0));
         }
-        MI.insert(MI.operands_begin() + (VI + 6), NewOps);
+        const unsigned InsertIdx = VI + 6;
+        const unsigned NumInserted = NewOps.size();
+
+        // Instruction references name values by <instruction number, operand
+        // index>. Inserting deopt operands shifts the statepoint's trailing
+        // implicit defs, including call return registers. Give the modified
+        // instruction a new number and describe where every old def moved so
+        // LiveDebugValues does not resolve a return value to an unrelated def.
+        const unsigned OldInstrNum = MI.peekDebugInstrNum();
+        SmallVector<unsigned, 8> OldDefIndices;
+        if (OldInstrNum)
+          for (const MachineOperand &MO : MI.all_defs())
+            OldDefIndices.push_back(MO.getOperandNo());
+
+        if (OldInstrNum)
+          MI.dropDebugNumber();
+        MI.insert(MI.operands_begin() + InsertIdx, NewOps);
+        if (OldInstrNum) {
+          const unsigned NewInstrNum = MI.getDebugInstrNum();
+          for (unsigned OldIdx : OldDefIndices) {
+            const unsigned NewIdx =
+                OldIdx < InsertIdx ? OldIdx : OldIdx + NumInserted;
+            MF.makeDebugValueSubstitution({OldInstrNum, OldIdx},
+                                          {NewInstrNum, NewIdx});
+          }
+        }
         MI.getOperand(VI + 5).setImm(Prev + LiveFIs.size());
         NSlots += LiveFIs.size();
         Changed = true;

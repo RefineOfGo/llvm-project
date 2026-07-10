@@ -20,6 +20,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
@@ -398,12 +399,55 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
 static MachineMemOperand* getMachineMemOperand(MachineFunction &MF,
                                                FrameIndexSDNode &FI) {
   auto PtrInfo = MachinePointerInfo::getFixedStack(MF, FI.getIndex());
-  auto MMOFlags = MachineMemOperand::MOStore |
-    MachineMemOperand::MOLoad | MachineMemOperand::MOVolatile;
   auto &MFI = MF.getFrameInfo();
+  // A statepoint fills its own spill slots before the call and the runtime
+  // reads them through the stack map: model those as volatile load+store.
+  // An immutable incoming argument slot referenced as a deopt location is
+  // only ever READ (nothing may write an immutable fixed object); claiming a
+  // volatile store here would pin every later reload of the slot above the
+  // call -- defeating the invariant-load exemption that lets MachineSinking
+  // sink such reloads past safepoints -- to guard against a write that
+  // cannot happen.
+  auto MMOFlags = MachineMemOperand::MOLoad;
+  if (!(MFI.isFixedObjectIndex(FI.getIndex()) &&
+        MFI.isImmutableObjectIndex(FI.getIndex())))
+    MMOFlags |= MachineMemOperand::MOStore | MachineMemOperand::MOVolatile;
   return MF.getMachineMemOperand(PtrInfo, MMOFlags,
                                  MFI.getObjectSize(FI.getIndex()),
                                  MFI.getObjectAlign(FI.getIndex()));
+}
+
+// If Incoming is the value loaded from an immutable incoming argument slot,
+// return that slot's fixed frame index.  Keeping the load as a normal
+// statepoint operand unnecessarily materializes it into a vreg before the
+// call; the interval then overlaps the call regmask and consumes a
+// callee-saved register or a new spill slot.  The fixed slot itself remains
+// valid for the whole call, so the stack map can describe its contents as an
+// Indirect location instead.  Declared in StatepointLowering.h; also used by
+// SelectionDAGISel::LowerArguments to populate RogArgLeafFixedSlots.
+std::optional<int> llvm::getIncomingFixedStackLoadFI(SDValue Incoming,
+                                                     MachineFrameInfo &MFI) {
+  // ExtractValue lowering may represent an aggregate as a MERGE_VALUES node
+  // and select one of its results rather than creating a separate extract
+  // node.  Follow that result back to the corresponding scalar input.
+  while (Incoming.getOpcode() == ISD::MERGE_VALUES) {
+    unsigned ResultNo = Incoming.getResNo();
+    if (ResultNo >= Incoming.getNumOperands())
+      return std::nullopt;
+    Incoming = Incoming.getOperand(ResultNo);
+  }
+
+  auto *Load = dyn_cast<LoadSDNode>(Incoming);
+  if (!Load || Incoming.getResNo() != 0 || !Load->isUnindexed() ||
+      Load->getExtensionType() != ISD::NON_EXTLOAD || !Load->isSimple() ||
+      Load->getMemoryVT() != Incoming.getValueType())
+    return std::nullopt;
+
+  auto *FI = dyn_cast<FrameIndexSDNode>(Load->getBasePtr());
+  if (!FI || !MFI.isFixedObjectIndex(FI->getIndex()) ||
+      !MFI.isImmutableObjectIndex(FI->getIndex()))
+    return std::nullopt;
+  return FI->getIndex();
 }
 
 /// Spill a value incoming to the statepoint. It might be either part of
@@ -721,8 +765,49 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
                 Builder.DAG.getFrameIndex(It->second, Builder.getFrameIndexTy());
         }
     }
+    // An Argument's pointer leaf whose ABI home is an immutable incoming
+    // fixed stack slot is described as that slot itself.  Aggregate formal
+    // arguments are scalarized into independent incoming loads, so the
+    // aggregate Argument has no single frame index; RogArgLeafFixedSlots
+    // (populated by SelectionDAGISel::LowerArguments) maps each scalar leaf
+    // back to its slot.  Resolving BEFORE getValue matters: getValue on a
+    // cross-block extractvalue exports the underlying scalar through a vreg,
+    // hoisting the slot load above every safepoint and pinning a
+    // callee-saved register across the calls purely to report a location the
+    // fixed slot already provides.  Deopt continues to carry semantic
+    // per-safepoint liveness, at zero register cost.
+    if (!Incoming.getNode() && V->getType()->isPointerTy()) {
+      const Value *Root = V;
+      unsigned LeafIdx = 0;
+      if (const auto *EV = dyn_cast<ExtractValueInst>(V)) {
+        Root = EV->getAggregateOperand();
+        LeafIdx = ComputeLinearIndex(Root->getType(), EV->getIndices());
+      }
+      if (const auto *A = dyn_cast<Argument>(Root)) {
+        auto It = Builder.FuncInfo.RogArgLeafFixedSlots.find(
+            {A->getArgNo(), LeafIdx});
+        if (It != Builder.FuncInfo.RogArgLeafFixedSlots.end()) {
+          MachineFrameInfo &MFI =
+              Builder.DAG.getMachineFunction().getFrameInfo();
+          MFI.markAsStatepointSpillSlotObjectIndex(It->second);
+          Incoming =
+              Builder.DAG.getFrameIndex(It->second, Builder.getFrameIndexTy());
+        }
+      }
+    }
     if (!Incoming.getNode())
       Incoming = Builder.getValue(V);
+
+    // Fallback for a pointer that is not (a leaf of) an Argument but was
+    // still loaded from an immutable incoming fixed slot in this block.
+    if (V->getType()->isPointerTy()) {
+      MachineFrameInfo &MFI = Builder.DAG.getMachineFunction().getFrameInfo();
+      if (std::optional<int> FI = getIncomingFixedStackLoadFI(Incoming, MFI)) {
+        MFI.markAsStatepointSpillSlotObjectIndex(*FI);
+        Incoming =
+            Builder.DAG.getFrameIndex(*FI, Builder.getFrameIndexTy());
+      }
+    }
     LLVM_DEBUG(dbgs() << "Value " << *V
                       << " requireSpillSlot = " << requireSpillSlot(V) << "\n");
     lowerIncomingStatepointValue(Incoming, requireSpillSlot(V), Ops, MemRefs,

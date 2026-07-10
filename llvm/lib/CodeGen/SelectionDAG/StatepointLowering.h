@@ -20,10 +20,21 @@
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include <cassert>
+#include <optional>
 
 namespace llvm {
 
+class MachineFrameInfo;
 class SelectionDAGBuilder;
+
+/// ROG precise GC: if \p Incoming is the value loaded from an immutable
+/// incoming argument slot, return that slot's fixed frame index.  Used by
+/// SelectionDAGISel::LowerArguments to record each argument leaf's ABI home
+/// (FunctionLoweringInfo::RogArgLeafFixedSlots) and by statepoint lowering to
+/// describe such roots as Indirect stack-map locations without extending a
+/// vreg across the call.
+std::optional<int> getIncomingFixedStackLoadFI(SDValue Incoming,
+                                               MachineFrameInfo &MFI);
 
 /// This class tracks both per-statepoint and per-selectiondag information.
 /// For each statepoint it tracks locations of it's gc valuess (incoming and

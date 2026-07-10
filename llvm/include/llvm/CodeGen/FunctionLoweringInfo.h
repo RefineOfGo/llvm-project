@@ -153,6 +153,14 @@ public:
   /// basic blocks.
   SmallVector<unsigned, 50> StatepointStackSlots;
 
+  /// ROG precise GC: maps (IR argument number, scalar leaf index in
+  /// ComputeValueVTs order) to the immutable incoming fixed stack slot the
+  /// leaf was loaded from by LowerFormalArguments.  Statepoint lowering uses
+  /// this to describe an argument deopt root as its ABI slot (an Indirect
+  /// stack-map location) instead of keeping the loaded value live across the
+  /// call.  Populated in SelectionDAGISel::LowerArguments.
+  DenseMap<std::pair<unsigned, unsigned>, int> RogArgLeafFixedSlots;
+
   /// MBB - The current block.
   MachineBasicBlock *MBB;
 

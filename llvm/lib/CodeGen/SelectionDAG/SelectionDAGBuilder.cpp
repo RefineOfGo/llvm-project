@@ -12039,6 +12039,16 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
       unsigned NumParts = TLI->getNumRegistersForCallingConv(
           *CurDAG->getContext(), F.getCallingConv(), VT);
 
+      // ROG precise GC: remember the immutable incoming fixed slot this
+      // scalar argument leaf was loaded from.  Statepoint lowering describes
+      // an argument deopt root as the slot itself (an Indirect stack-map
+      // location) instead of keeping the loaded value live across the call
+      // (see lowerStatepointMetaArgs).
+      if (NumParts == 1)
+        if (std::optional<int> FI = getIncomingFixedStackLoadFI(
+                InVals[i], DAG.getMachineFunction().getFrameInfo()))
+          FuncInfo->RogArgLeafFixedSlots[{Arg.getArgNo(), Val}] = *FI;
+
       // Even an apparent 'unused' swifterror argument needs to be returned. So
       // we do generate a copy for it that can be used on return from the
       // function.

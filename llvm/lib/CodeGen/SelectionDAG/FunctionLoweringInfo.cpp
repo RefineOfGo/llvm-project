@@ -374,6 +374,7 @@ void FunctionLoweringInfo::clear() {
   RegFixups.clear();
   RegsWithFixups.clear();
   StatepointStackSlots.clear();
+  RogArgLeafFixedSlots.clear();
   StatepointRelocationMaps.clear();
   PreferredExtendType.clear();
   PreprocessedDVRDeclares.clear();

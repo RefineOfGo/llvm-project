@@ -350,8 +350,12 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
   if (CallEnd->getOpcode() == ISD::EH_LABEL)
     CallEnd = CallEnd->getOperand(0).getNode();
 
-  bool HasDef = !SI.CLI.RetTy->isVoidTy();
-  if (HasDef && CallEnd->getOpcode() != ISD::CALLSEQ_END) {
+  // Do NOT gate the walk below on `!SI.CLI.RetTy->isVoidTy()`: when the
+  // return value is demoted to memory (an aggregate too large for the return
+  // registers, e.g. a Go function returning {12 x double}), LowerCallTo
+  // rewrites CLI.RetTy to void, yet the call sequence still ends in the
+  // field-by-field reload nodes this walk exists to skip.
+  if (CallEnd->getOpcode() != ISD::CALLSEQ_END) {
     // The get_return_value shape depends on how the return value reaches us:
     // a chain of CopyFromReg nodes (multi-register returns, including
     // aggregates split over several return registers), a single LOAD (a
@@ -385,13 +389,14 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
     }
     if (Found)
       CallEnd = Found;
-    else {
-      errs() << "rog-statepoint: CALLSEQ_END walk failed in "
-             << Builder.FuncInfo.Fn->getName() << "; return-value tail:\n";
-      CallEndVal.getNode()->printrWithDepth(errs(), &Builder.DAG, 5);
-    }
   }
 
+  if (CallEnd->getOpcode() != ISD::CALLSEQ_END) {
+    errs() << "rog-statepoint: CALLSEQ_END walk failed in "
+           << Builder.FuncInfo.Fn->getName() << " (RetTy void="
+           << SI.CLI.RetTy->isVoidTy() << "); return-value tail:\n";
+    CallEndVal.getNode()->printrWithDepth(errs(), &Builder.DAG, 6);
+  }
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
   return std::make_pair(ReturnValue, CallEnd->getOperand(0).getNode());
 }

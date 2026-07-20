@@ -430,6 +430,15 @@ private:
   /// is empty (true for ROG's deopt-pointer maps).
   void serializeToStackMapSectionPerFunction();
 
+  /// ROG precise GC: emit one function's records as a compact dictionary blob
+  /// (version 0x52) instead of the v3 layout: distinct locations are interned
+  /// into a per-function slot dictionary, distinct live sets into a bitmap
+  /// table, and each record shrinks to (instruction offset, set index). See
+  /// the definition for the exact layout. `StartIdx` is the function's first
+  /// record in `CSInfos`.
+  void emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
+                               const FunctionInfo &FnInfo, unsigned StartIdx);
+
   LLVM_ABI void print(raw_ostream &OS);
   void debug() { print(dbgs()); }
 };

@@ -35,8 +35,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
+#include <map>
 #include <utility>
+#include <vector>
 
 using namespace llvm;
 
@@ -844,6 +847,11 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 
   LLVM_DEBUG(dbgs() << "***** Stack Map Output (per-function) *****\n");
 
+  // ROG_STACKMAP_V3: diagnostic escape hatch — emit the uncompressed v3
+  // per-function blobs (llvm-readobj-compatible) instead of the compact
+  // dictionary format, e.g. for differential decoding of the two layouts.
+  const bool EmitV3 = std::getenv("ROG_STACKMAP_V3") != nullptr;
+
   // CSInfos is ordered by function in FnInfos order, RecordCount entries each;
   // walk both in lockstep.
   unsigned CSIdx = 0;
@@ -865,6 +873,13 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
         ".llvm_stackmaps", ELF::SHT_PROGBITS, Flags, /*EntrySize=*/0, Group,
         /*IsComdat=*/Group != nullptr, MCSection::NonUniqueID, FnSymELF);
     OS.switchSection(Sec);
+
+    if (!EmitV3) {
+      emitCompactFunctionBlob(OS, FnSym, FnInfo, CSIdx);
+      CSIdx += FnInfo.RecordCount;
+      OS.addBlankLine();
+      continue;
+    }
 
     // Self-describing header for a single function (no constants).
     OS.emitIntValue(StackMapVersion, 1); // Version.
@@ -896,4 +911,157 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
   }
   assert(CSIdx == CSInfos.size() &&
          "per-function callsite count must cover all records");
+}
+
+/// ROG precise GC: compact per-function stack-map blob (version 0x52, 'R').
+///
+/// The v3 layout re-lists every live location at every record. Functions with
+/// many always-live slots and many safepoints (large generated package init
+/// functions: ~28k records x ~3k slots each) blow the section up to gigabytes,
+/// which pushes the final image past the ±2 GiB PC32 relocation range and, at
+/// runtime, costs a multi-GiB eager parse. Location lists at different records
+/// of one function draw from a small universe and are near-identical, so the
+/// blob factors the repetition out through two levels of sharing:
+///   - a slot dictionary of the distinct (kind, dwarf reg, offset, size|flags)
+///     locations, with each Direct's trailing size-annotation Constant already
+///     folded in (mirroring the runtime reader's v3 folding, including the
+///     clamp of negative annotations to 0);
+///   - a table of the distinct live sets, each a bitmap over the dictionary;
+///   - one 8-byte record per safepoint: instruction offset + set index, with
+///     bit 31 carrying the "incomplete" flag (bit 63 of the v3 patchpoint ID).
+/// Locations within a record are order-insensitive for the runtime (each is an
+/// independent root read / stack-object registration), so sets are sorted and
+/// deduplicated. Leading statepoint-metadata Constants and LiveOuts are
+/// dropped, exactly as the v3 runtime reader drops them.
+///
+/// Layout (little-endian; every section is a multiple of 8 bytes so the
+/// linker's concatenation keeps each blob 8-aligned):
+///   u8 0x52, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
+///   u64 FunctionAddress, u64 StackSize, i32 CSRLo, i32 CSRHi
+///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size_flags }
+///   <pad to 8>
+///   u64 SetBits[NumSets][ceil(NumSlots/64)]
+///   Record[NumRecords] { u32 instr_offset, u32 set_idx | incomplete << 31 }
+void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
+                                        const FunctionInfo &FnInfo,
+                                        unsigned StartIdx) {
+  struct Slot {
+    uint8_t Kind;
+    uint16_t Reg;
+    int32_t Offset;
+    uint32_t SizeFlags;
+  };
+  SmallVector<Slot, 32> Dict;
+  DenseMap<std::pair<uint64_t, uint64_t>, uint32_t> DictIdx;
+  std::vector<std::vector<uint32_t>> Sets;
+  std::map<std::vector<uint32_t>, uint32_t> SetIdx;
+  struct Rec {
+    const MCExpr *Offset;
+    uint32_t SetAndFlags;
+  };
+  std::vector<Rec> Recs;
+  Recs.reserve(FnInfo.RecordCount);
+
+  for (uint64_t I = 0; I < FnInfo.RecordCount; ++I) {
+    const CallsiteInfo &CSI = CSInfos[StartIdx + I];
+
+    // Fold the v3 location stream into semantic slots, mirroring the runtime
+    // reader: value locations (Register/Direct/Indirect) are kept; a Constant
+    // immediately after a Direct is that Direct's size|flags annotation; any
+    // other Constant/ConstantIndex is statepoint metadata and dropped.
+    SmallVector<Slot, 64> RecSlots;
+    bool AwaitingSize = false;
+    for (const Location &Loc : CSI.Locations) {
+      switch (Loc.Type) {
+      case Location::Register:
+      case Location::Direct:
+      case Location::Indirect:
+        RecSlots.push_back(
+            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*SizeFlags=*/0});
+        AwaitingSize = Loc.Type == Location::Direct;
+        break;
+      case Location::Constant:
+        if (AwaitingSize) {
+          RecSlots.back().SizeFlags =
+              uint32_t(std::max<int32_t>(Loc.Offset, 0));
+          AwaitingSize = false;
+        }
+        break;
+      default:
+        AwaitingSize = false;
+        break;
+      }
+    }
+
+    std::vector<uint32_t> Set;
+    Set.reserve(RecSlots.size());
+    for (const Slot &S : RecSlots) {
+      auto Key = std::make_pair((uint64_t(S.Kind) << 48) |
+                                    (uint64_t(S.Reg) << 32) |
+                                    uint64_t(uint32_t(S.Offset)),
+                                uint64_t(S.SizeFlags));
+      auto [It, New] = DictIdx.try_emplace(Key, Dict.size());
+      if (New)
+        Dict.push_back(S);
+      Set.push_back(It->second);
+    }
+    llvm::sort(Set);
+    Set.erase(llvm::unique(Set), Set.end());
+
+    auto [SIt, SNew] = SetIdx.try_emplace(Set, uint32_t(Sets.size()));
+    if (SNew)
+      Sets.push_back(std::move(Set));
+    assert(Sets.size() < (uint32_t(1) << 31) && "set index overflows 31 bits");
+
+    uint32_t SetAndFlags = SIt->second | uint32_t(CSI.ID >> 63) << 31;
+    Recs.push_back({CSI.CSOffsetExpr, SetAndFlags});
+  }
+
+  // Header.
+  OS.AddComment("ROG compact stackmap version");
+  OS.emitIntValue(0x52, 1);
+  OS.emitIntValue(0, 1); // Reserved.
+  OS.emitInt16(0);       // Reserved.
+  OS.AddComment("  Num Slots");
+  OS.emitInt32(Dict.size());
+  OS.AddComment("  Num Sets");
+  OS.emitInt32(Sets.size());
+  OS.AddComment("  Num Records");
+  OS.emitInt32(Recs.size());
+
+  OS.AddComment("Function Address");
+  OS.emitSymbolValue(FnSym, 8);
+  OS.AddComment("  Stack Size");
+  OS.emitIntValue(FnInfo.StackSize, 8);
+  OS.AddComment("  CSR area Lo (rbp-relative)");
+  OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRLo), 4);
+  OS.AddComment("  CSR area Hi (rbp-relative)");
+  OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRHi), 4);
+
+  // Slot dictionary.
+  for (const Slot &S : Dict) {
+    OS.emitIntValue(S.Kind, 1);
+    OS.emitIntValue(0, 1); // Reserved.
+    OS.emitInt16(S.Reg);
+    OS.emitIntValue(static_cast<uint32_t>(S.Offset), 4);
+    OS.emitIntValue(S.SizeFlags, 4);
+  }
+  OS.emitValueToAlignment(Align(8));
+
+  // Live-set bitmaps.
+  const size_t Words = (Dict.size() + 63) / 64;
+  SmallVector<uint64_t, 64> Bits;
+  for (const auto &Set : Sets) {
+    Bits.assign(Words, 0);
+    for (uint32_t Idx : Set)
+      Bits[Idx / 64] |= uint64_t(1) << (Idx % 64);
+    for (uint64_t W : Bits)
+      OS.emitIntValue(W, 8);
+  }
+
+  // Records.
+  for (const Rec &R : Recs) {
+    OS.emitValue(R.Offset, 4);
+    OS.emitIntValue(R.SetAndFlags, 4);
+  }
 }

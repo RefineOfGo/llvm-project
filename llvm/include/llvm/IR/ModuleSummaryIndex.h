@@ -655,6 +655,15 @@ public:
   /// Return the list of values referenced by this global value definition.
   ArrayRef<ValueInfo> refs() const { return RefEdgeList; }
 
+  /// Prepend additional (regular) reference edges. Used to inject synthetic
+  /// edges — e.g. comdat co-membership, so index-based dead stripping keeps
+  /// comdat groups alive as a unit like module-level GlobalDCE does.
+  /// Prepending keeps FunctionSummary's readonly/writeonly refs, which are
+  /// sorted to the end of the list (see specialRefCounts), in place.
+  void addRefsFront(ArrayRef<ValueInfo> Extra) {
+    RefEdgeList.insert(RefEdgeList.begin(), Extra.begin(), Extra.end());
+  }
+
   /// If this is an alias summary, returns the summary of the aliased object (a
   /// global variable or function), otherwise returns itself.
   GlobalValueSummary *getBaseObject();

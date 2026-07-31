@@ -1096,6 +1096,40 @@ ModuleSummaryIndex llvm::buildModuleSummaryIndex(
     });
   }
 
+  // Index-based dead stripping (computeDeadSymbols) walks summary reference
+  // edges only and knows nothing about comdats, while module-level GlobalDCE
+  // keeps or drops a comdat group as a unit (see GlobalDCE's MarkLive). A
+  // group member with no IR references — e.g. a registry entry discovered by
+  // the runtime through a section scan, kept alive by grouping it with the
+  // object it describes — is therefore dead in the index even when its group
+  // is live, so values only it references can be stripped from other modules,
+  // leaving the materialized member with dangling references. Mirror the
+  // group co-liveness rule into the index by adding synthetic reference
+  // edges between comdat group members. MapVector keeps module order so the
+  // emitted summaries stay deterministic.
+  MapVector<const Comdat *, SmallVector<const GlobalObject *, 2>>
+      ComdatMembers;
+  for (const GlobalObject &GO : M.global_objects()) {
+    if (GO.isDeclaration())
+      continue;
+    if (const Comdat *C = GO.getComdat())
+      ComdatMembers[C].push_back(&GO);
+  }
+  for (const auto &[C, Members] : ComdatMembers) {
+    if (Members.size() < 2)
+      continue;
+    for (const GlobalObject *GO : Members) {
+      auto VI = Index.getValueInfo(GO->getGUID());
+      if (!VI || VI.getSummaryList().empty())
+        continue;
+      SmallVector<ValueInfo, 2> Extra;
+      for (const GlobalObject *Other : Members)
+        if (Other != GO)
+          Extra.push_back(Index.getOrInsertValueInfo(Other));
+      VI.getSummaryList().front()->addRefsFront(Extra);
+    }
+  }
+
   for (auto *V : LocalsUsed) {
     auto *Summary = Index.getGlobalValueSummary(*V);
     assert(Summary && "Missing summary for global value");

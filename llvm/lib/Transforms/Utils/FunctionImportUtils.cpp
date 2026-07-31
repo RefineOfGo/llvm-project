@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TimeProfiler.h"
 
@@ -96,6 +97,18 @@ bool FunctionImportGlobalProcessing::shouldPromoteLocalToGlobal(
     return false;
 
   if (isPerformingImport()) {
+    // ROG: an index-dead local can never be referenced by imported code —
+    // import roots are live-only (see computeImportForModule) and dead
+    // stripping walked every live summary's references. Promoting it only
+    // creates an external copy that survives the later re-internalization
+    // dance while its own references were never marked live, so the
+    // definitions it depends on can be stripped from other modules, leaving
+    // dangling references at the final link.
+    if (VI && llvm::none_of(VI.getSummaryList(),
+                            [](const std::unique_ptr<GlobalValueSummary> &S) {
+                              return S->isLive();
+                            }))
+      return false;
     assert((!GlobalsToImport->count(const_cast<GlobalValue *>(SGV)) ||
             !isNonRenamableLocal(*SGV)) &&
            "Attempting to promote non-renamable local");

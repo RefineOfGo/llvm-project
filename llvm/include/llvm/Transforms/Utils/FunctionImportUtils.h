@@ -63,7 +63,7 @@ class FunctionImportGlobalProcessing {
   DenseMap<const Comdat *, Comdat *> RenamedComdats;
 
   /// Check if we should promote the given local value to global scope.
-  bool shouldPromoteLocalToGlobal(const GlobalValue *SGV,
+  bool shouldPromoteLocalToGlobal(const GlobalValue *SGV, ValueInfo VI,
                                   GlobalValueSummary *Summary);
 
 #ifndef NDEBUG

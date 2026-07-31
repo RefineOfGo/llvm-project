@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TimeProfiler.h"
 
@@ -83,7 +84,7 @@ bool FunctionImportGlobalProcessing::doImportAsDefinition(
 }
 
 bool FunctionImportGlobalProcessing::shouldPromoteLocalToGlobal(
-    const GlobalValue *SGV, GlobalValueSummary *Summary) {
+    const GlobalValue *SGV, ValueInfo VI, GlobalValueSummary *Summary) {
   assert(SGV->hasLocalLinkage());
 
   // Ifuncs and ifunc alias does not have summary.
@@ -98,6 +99,18 @@ bool FunctionImportGlobalProcessing::shouldPromoteLocalToGlobal(
     return false;
 
   if (isPerformingImport()) {
+    // ROG: an index-dead local can never be referenced by imported code —
+    // import roots are live-only (see computeImportForModule) and dead
+    // stripping walked every live summary's references. Promoting it only
+    // creates an external copy that survives the later re-internalization
+    // dance while its own references were never marked live, so the
+    // definitions it depends on can be stripped from other modules, leaving
+    // dangling references at the final link.
+    if (VI && llvm::none_of(VI.getSummaryList(),
+                            [](const std::unique_ptr<GlobalValueSummary> &S) {
+                              return S->isLive();
+                            }))
+      return false;
     assert((!GlobalsToImport->count(const_cast<GlobalValue *>(SGV)) ||
             !isNonRenamableLocal(*SGV)) &&
            "Attempting to promote non-renamable local");
@@ -312,10 +325,10 @@ void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
         VI, GV.getParent()->getModuleIdentifier());
 
   assert((!Summary || !Summary->noRenameOnPromotion() ||
-          shouldPromoteLocalToGlobal(&GV, Summary)) &&
+          shouldPromoteLocalToGlobal(&GV, VI, Summary)) &&
          "noRenameOnPromotion requires promotion to external linkage");
 
-  if (GV.hasLocalLinkage() && shouldPromoteLocalToGlobal(&GV, Summary)) {
+  if (GV.hasLocalLinkage() && shouldPromoteLocalToGlobal(&GV, VI, Summary)) {
     // Save the original name string before we rename GV below.
     auto Name = GV.getName().str();
     if (AlwaysRenamePromotedLocals || !Summary ||

@@ -354,6 +354,14 @@ public:
     return getFrameIndexReference(MF, FI, FrameReg);
   }
 
+  /// Return true when a frame-index reference resolved through \p FrameReg is
+  /// relative to the current stack pointer and must therefore be adjusted by
+  /// temporary call-frame stack-pointer updates at the use site.
+  virtual bool shouldApplySPAdjToFrameIndexReference(
+      const MachineFunction &MF, Register FrameReg) const {
+    return true;
+  }
+
   /// getNonLocalFrameIndexReference - This method returns the offset used to
   /// reference a frame index location. The offset can be from either FP/BP/SP
   /// based on which base register is returned by llvm.localaddress.

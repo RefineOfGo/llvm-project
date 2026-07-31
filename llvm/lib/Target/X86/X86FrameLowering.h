@@ -123,6 +123,8 @@ public:
   getFrameIndexReferencePreferSP(const MachineFunction &MF, int FI,
                                  Register &FrameReg,
                                  bool IgnoreSPUpdates) const override;
+  bool shouldApplySPAdjToFrameIndexReference(
+      const MachineFunction &MF, Register FrameReg) const override;
 
   MachineBasicBlock::iterator
   eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,

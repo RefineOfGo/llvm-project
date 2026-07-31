@@ -1481,7 +1481,15 @@ bool PEIImpl::replaceFrameIndexDebugInstr(MachineFunction &MF, MachineInstr &MI,
         MF, MI.getOperand(OpIdx).getIndex(), Reg, /*IgnoreSPUpdates*/ false);
     assert(!refOffset.getScalable() &&
            "Frame offsets with a scalable component are not supported");
-    Offset.setImm(Offset.getImm() + refOffset.getFixed() + SPAdj);
+    int64_t Adj = refOffset.getFixed();
+    // STATEPOINT stackmap operands are consumed as [base + offset]. SPAdj
+    // models temporary call-argument pushes in the current block. Apply it
+    // only to references that are truly stack-pointer-relative; fixed
+    // incoming arguments addressed from the frame pointer or locals addressed
+    // from a base pointer are independent of outgoing argument pushes.
+    if (TFI->shouldApplySPAdjToFrameIndexReference(MF, Reg))
+      Adj += SPAdj;
+    Offset.setImm(Offset.getImm() + Adj);
     MI.getOperand(OpIdx).ChangeToRegister(Reg, false /*isDef*/);
     return true;
   }

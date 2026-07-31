@@ -2852,6 +2852,11 @@ X86FrameLowering::getFrameIndexReferencePreferSP(const MachineFunction &MF,
   return getFrameIndexReferenceSP(MF, FI, FrameReg, StackSize);
 }
 
+bool X86FrameLowering::shouldApplySPAdjToFrameIndexReference(
+    const MachineFunction &MF, Register FrameReg) const {
+  return FrameReg == TRI->getStackRegister();
+}
+
 bool X86FrameLowering::assignCalleeSavedSpillSlots(
     MachineFunction &MF, const TargetRegisterInfo *TRI,
     std::vector<CalleeSavedInfo> &CSI) const {

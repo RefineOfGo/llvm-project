@@ -1,9 +1,11 @@
 ; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s
 ; RUN: llc -O3 -stop-after=finalize-isel < %s | FileCheck %s --check-prefix=MIR
+; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s --check-prefix=STACKMAP
 
 target triple = "x86_64-unknown-linux-gnu"
 
 declare rogcc void @bar()
+declare rogcc void @bar_many(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
 declare token @llvm.experimental.gc.statepoint.p0(i64, i32, ptr, i32, i32, ...)
 
 ; The eight scalar arguments consume ROG's GPR argument registers, leaving
@@ -118,4 +120,36 @@ next:
 out:
   %data2 = extractvalue { ptr, i64, i64 } %slice, 0
   ret ptr %data2
+}
+
+; A realigned frame plus stack-passed statepoint call arguments used to make PEI
+; apply the in-call SP adjustment to every statepoint frame-index operand. That
+; is only valid for SP-based locations. This incoming fixed argument stays
+; frame-pointer based and must remain at 16(%rbp), not be shifted by the call
+; sequence's outgoing stack arguments.
+define rogcc void @incoming_fixed_pointer_with_stack_call_args(
+    ptr %a0, ptr %a1, ptr %a2, ptr %a3,
+    ptr %a4, ptr %a5, ptr %a6, ptr %a7,
+    { ptr, i64, i64 } %slice) gc "statepoint-example" {
+; STACKMAP-LABEL: .section .llvm_stackmaps,"ao",@progbits,incoming_fixed_pointer_with_stack_call_args
+; STACKMAP:       .quad incoming_fixed_pointer_with_stack_call_args
+; STACKMAP:       .byte 3
+; STACKMAP-NEXT:  .byte 0
+; STACKMAP-NEXT:  .short 6
+; STACKMAP-NEXT:  .long 16
+entry:
+  %buf = alloca [64 x i8], align 64
+  call void asm sideeffect "", "r"(ptr %buf)
+  %data = extractvalue { ptr, i64, i64 } %slice, 0
+  call rogcc token (i64, i32, ptr, i32, i32, ...)
+      @llvm.experimental.gc.statepoint.p0(
+          i64 6, i32 0,
+          ptr elementtype(void (ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)) @bar_many,
+          i32 11, i32 0,
+          ptr %a0, ptr %a1, ptr %a2, ptr %a3,
+          ptr %a4, ptr %a5, ptr %a6, ptr %a7,
+          ptr %data, ptr %a0, ptr %a1,
+          i32 0, i32 0)
+      [ "deopt"(ptr %data) ]
+  ret void
 }

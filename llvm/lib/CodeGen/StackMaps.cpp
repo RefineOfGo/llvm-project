@@ -913,7 +913,7 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
          "per-function callsite count must cover all records");
 }
 
-/// ROG precise GC: compact per-function stack-map blob (version 0x52, 'R').
+/// ROG precise GC: compact per-function stack-map blob (version 0x53, 'S').
 ///
 /// The v3 layout re-lists every live location at every record. Functions with
 /// many always-live slots and many safepoints (large generated package init
@@ -928,20 +928,27 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 ///     clamp of negative annotations to 0);
 ///   - a table of the distinct live sets, each a bitmap over the dictionary;
 ///   - one 8-byte record per safepoint: instruction offset + set index, with
-///     bit 31 carrying the "incomplete" flag (bit 63 of the v3 patchpoint ID).
+///     bit 31 carrying the "incomplete" flag (bit 63 of the v3 patchpoint ID)
+///     and bit 30 carrying the "prologue-entry" flag (bit 62 of the ID; see
+///     kROGPrologueEntryStackMapID in ROGRuntimeSymbols.h).
 /// Locations within a record are order-insensitive for the runtime (each is an
 /// independent root read / stack-object registration), so sets are sorted and
 /// deduplicated. Leading statepoint-metadata Constants and LiveOuts are
 /// dropped, exactly as the v3 runtime reader drops them.
 ///
+/// Version history: 0x52 gave the set index all 31 low bits of a record;
+/// 0x53 narrowed it to 30 to make room for the prologue-entry flag. The
+/// runtime reader accepts both.
+///
 /// Layout (little-endian; every section is a multiple of 8 bytes so the
 /// linker's concatenation keeps each blob 8-aligned):
-///   u8 0x52, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
+///   u8 0x53, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
 ///   u64 FunctionAddress, u64 StackSize, i32 CSRLo, i32 CSRHi
 ///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size_flags }
 ///   <pad to 8>
 ///   u64 SetBits[NumSets][ceil(NumSlots/64)]
-///   Record[NumRecords] { u32 instr_offset, u32 set_idx | incomplete << 31 }
+///   Record[NumRecords] { u32 instr_offset,
+///                        u32 set_idx | prologue_entry << 30 | incomplete << 31 }
 void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
                                         const FunctionInfo &FnInfo,
                                         unsigned StartIdx) {
@@ -1011,15 +1018,16 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
     auto [SIt, SNew] = SetIdx.try_emplace(Set, uint32_t(Sets.size()));
     if (SNew)
       Sets.push_back(std::move(Set));
-    assert(Sets.size() < (uint32_t(1) << 31) && "set index overflows 31 bits");
+    assert(Sets.size() < (uint32_t(1) << 30) && "set index overflows 30 bits");
 
-    uint32_t SetAndFlags = SIt->second | uint32_t(CSI.ID >> 63) << 31;
+    uint32_t SetAndFlags = SIt->second | uint32_t((CSI.ID >> 62) & 1) << 30 |
+                           uint32_t(CSI.ID >> 63) << 31;
     Recs.push_back({CSI.CSOffsetExpr, SetAndFlags});
   }
 
   // Header.
   OS.AddComment("ROG compact stackmap version");
-  OS.emitIntValue(0x52, 1);
+  OS.emitIntValue(0x53, 1);
   OS.emitIntValue(0, 1); // Reserved.
   OS.emitInt16(0);       // Reserved.
   OS.AddComment("  Num Slots");

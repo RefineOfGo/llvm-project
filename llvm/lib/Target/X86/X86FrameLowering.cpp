@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/EHPersonalities.h"
@@ -3634,6 +3635,35 @@ void X86FrameLowering::adjustForROGPrologue(
   BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
     .addUse(X86::R11, RegState::ImplicitKill)
     .addExternalSymbol(kROGStackCheckFn);
+
+  // ROG precise GC: a stackmap record at the stack-growth call's return
+  // point. The frame-pointer chain drops this function's caller at that call
+  // (no RBP link exists yet), and the GC's frame walk recovers the caller
+  // from the return address at [entry_rsp]; this record is the walk's
+  // positive identification of the shape, and its Direct location describes
+  // THIS function's incoming stack-argument area
+  // [entry_rsp + 8, entry_rsp + 8 + args) -- the one span of the combined
+  // region no other record describes (the function is stopped at its entry,
+  // where it has no safepoint records, and the caller's record deliberately
+  // omits handed-off outgoing arguments). Not one instruction of the check
+  // sequence moves RSP, so RSP at this call IS the entry RSP and the record
+  // needs no frame geometry: the runtime evaluates it at the recovered entry
+  // RSP (see scan_morestack_frame in the runtime). Emitted unconditionally:
+  // an empty record still says "no stack arguments" and self-describes the
+  // object as built by a toolchain that emits argument records, which is
+  // what lets the walk drop the combined region's conservative scan without
+  // trusting toolchain provenance.
+  MachineInstrBuilder StackMapMIB =
+      BuildMI(allocMBB, DL, TII.get(TargetOpcode::STACKMAP))
+          .addImm(kROGPrologueEntryStackMapID)
+          .addImm(0); // No shadow bytes.
+  if (unsigned ArgBytes =
+          MF.getInfo<X86MachineFunctionInfo>()->getArgumentStackSize())
+    StackMapMIB.addImm(StackMaps::DirectMemRefOp)
+        .addReg(X86::RSP)
+        .addImm(SlotSize) // Skip the return-address slot.
+        .addImm(StackMaps::ConstantOp)
+        .addImm(ArgBytes); // Size annotation, folded into the Direct slot.
 
   BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
     .addMBB(entryMBB);

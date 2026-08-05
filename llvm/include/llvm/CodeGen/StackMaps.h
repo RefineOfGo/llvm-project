@@ -431,7 +431,7 @@ private:
   void serializeToStackMapSectionPerFunction();
 
   /// ROG precise GC: emit one function's records as a compact dictionary blob
-  /// (version 0x53) instead of the v3 layout: distinct locations are interned
+  /// (version 0x54) instead of the v3 layout: distinct locations are interned
   /// into a per-function slot dictionary, distinct live sets into a bitmap
   /// table, and each record shrinks to (instruction offset, set index). See
   /// the definition for the exact layout. `StartIdx` is the function's first

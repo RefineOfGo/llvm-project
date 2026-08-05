@@ -52,7 +52,7 @@ entry:
 ; offset 8, size 16); the record at the morestack return point carries
 ; set_idx | 1 << 30 (1073741825 = 0x40000001).
 ; CHECK:         .section .llvm_stackmaps,"ao",@progbits,grow_with_stack_args
-; CHECK:         .byte 83
+; CHECK:         .byte 84
 ; CHECK:         .byte 2
 ; CHECK-NEXT:    .byte 0
 ; CHECK-NEXT:    .short 7
@@ -62,7 +62,7 @@ entry:
 ; CHECK-NEXT:    .long 1073741825
 
 ; CHECK:         .section .llvm_stackmaps,"ao",@progbits,grow_reg_only
-; CHECK:         .byte 83
+; CHECK:         .byte 84
 ; CHECK:         .long .Ltmp[[PE2]]-grow_reg_only
 ; CHECK-NEXT:    .long 1073741825
 ; CHECK-NOT:     .llvm_stackmaps,"ao",@progbits,grow_no_gc

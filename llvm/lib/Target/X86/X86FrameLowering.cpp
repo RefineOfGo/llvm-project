@@ -3648,22 +3648,35 @@ void X86FrameLowering::adjustForROGPrologue(
   // omits handed-off outgoing arguments). Not one instruction of the check
   // sequence moves RSP, so RSP at this call IS the entry RSP and the record
   // needs no frame geometry: the runtime evaluates it at the recovered entry
-  // RSP (see scan_morestack_frame in the runtime). Emitted unconditionally:
-  // an empty record still says "no stack arguments" and self-describes the
-  // object as built by a toolchain that emits argument records, which is
-  // what lets the walk drop the combined region's conservative scan without
-  // trusting toolchain provenance.
-  MachineInstrBuilder StackMapMIB =
-      BuildMI(allocMBB, DL, TII.get(TargetOpcode::STACKMAP))
-          .addImm(kROGPrologueEntryStackMapID)
-          .addImm(0); // No shadow bytes.
-  if (unsigned ArgBytes =
-          MF.getInfo<X86MachineFunctionInfo>()->getArgumentStackSize())
-    StackMapMIB.addImm(StackMaps::DirectMemRefOp)
-        .addReg(X86::RSP)
-        .addImm(SlotSize) // Skip the return-address slot.
-        .addImm(StackMaps::ConstantOp)
-        .addImm(ArgBytes); // Size annotation, folded into the Direct slot.
+  // RSP (see scan_morestack_frame in the runtime). Emitted for every
+  // GC-managed ("rog" strategy) function, argument area or not: an empty
+  // record still says "no stack arguments" and self-describes the object as
+  // built by a toolchain that emits argument records, which is what lets the
+  // walk drop the combined region's conservative scan without trusting
+  // toolchain provenance.
+  //
+  // Functions WITHOUT a GC strategy (the Rust runtime and std built by
+  // ROG's rustc, which carry the same stack check) get no record: the GC
+  // walk never consumes stack maps for Rust frames (it identifies their
+  // stack-growth callsites by instruction bytes and scans conservatively),
+  // and emitting one would materialize an .llvm_stackmaps section with an
+  // 8-byte absolute relocation to the function symbol -- which rust-lld
+  // rejects for preemptible symbols when linking libstd as a PIC dylib
+  // (R_X86_64_64 in a read-only section; ROG's own link uses -z notext and
+  // never hits this).
+  if (MF.getFunction().hasGC()) {
+    MachineInstrBuilder StackMapMIB =
+        BuildMI(allocMBB, DL, TII.get(TargetOpcode::STACKMAP))
+            .addImm(kROGPrologueEntryStackMapID)
+            .addImm(0); // No shadow bytes.
+    if (unsigned ArgBytes =
+            MF.getInfo<X86MachineFunctionInfo>()->getArgumentStackSize())
+      StackMapMIB.addImm(StackMaps::DirectMemRefOp)
+          .addReg(X86::RSP)
+          .addImm(SlotSize) // Skip the return-address slot.
+          .addImm(StackMaps::ConstantOp)
+          .addImm(ArgBytes); // Size annotation, folded into the Direct slot.
+  }
 
   BuildMI(allocMBB, DL, TII.get(X86::JMP_1))
     .addMBB(entryMBB);

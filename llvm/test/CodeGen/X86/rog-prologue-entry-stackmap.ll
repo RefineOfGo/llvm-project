@@ -65,5 +65,20 @@ entry:
 ; CHECK:         .byte 83
 ; CHECK:         .long .Ltmp[[PE2]]-grow_reg_only
 ; CHECK-NEXT:    .long 1073741825
+; CHECK-NOT:     .llvm_stackmaps,"ao",@progbits,grow_no_gc
+
+; A stack-check function WITHOUT a GC strategy (the Rust runtime/std built
+; by ROG's rustc) must get the check but NO stackmap blob: the GC never
+; consumes records for such frames, and the blob's absolute function-address
+; relocation breaks PIC dylib links (rust-lld rejects R_X86_64_64 against
+; preemptible symbols when building libstd).
+define rogcc ptr @grow_no_gc(ptr %a0, ptr %a1) #0 {
+; The stackmap section check lives at the end of the file (after the last
+; positive .llvm_stackmaps match): no blob may exist for this function.
+entry:
+  %mem = alloca [64 x i8]
+  call void asm sideeffect "", "r"(ptr %mem)
+  ret ptr null
+}
 
 attributes #0 = { "rog-stack-check" "frame-pointer"="all" }

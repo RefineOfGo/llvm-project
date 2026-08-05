@@ -913,7 +913,7 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
          "per-function callsite count must cover all records");
 }
 
-/// ROG precise GC: compact per-function stack-map blob (version 0x53, 'S').
+/// ROG precise GC: compact per-function stack-map blob (version 0x54, 'T').
 ///
 /// The v3 layout re-lists every live location at every record. Functions with
 /// many always-live slots and many safepoints (large generated package init
@@ -937,12 +937,13 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 /// dropped, exactly as the v3 runtime reader drops them.
 ///
 /// Version history: 0x52 gave the set index all 31 low bits of a record;
-/// 0x53 narrowed it to 30 to make room for the prologue-entry flag. The
+/// 0x53 narrowed it to 30 to make room for the prologue-entry flag; 0x54
+/// switched the function address to PC-relative (see below). The
 /// runtime reader accepts both.
 ///
 /// Layout (little-endian; every section is a multiple of 8 bytes so the
 /// linker's concatenation keeps each blob 8-aligned):
-///   u8 0x53, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
+///   u8 0x54, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
 ///   u64 FunctionAddress, u64 StackSize, i32 CSRLo, i32 CSRHi
 ///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size_flags }
 ///   <pad to 8>
@@ -1027,7 +1028,7 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
 
   // Header.
   OS.AddComment("ROG compact stackmap version");
-  OS.emitIntValue(0x53, 1);
+  OS.emitIntValue(0x54, 1);
   OS.emitIntValue(0, 1); // Reserved.
   OS.emitInt16(0);       // Reserved.
   OS.AddComment("  Num Slots");
@@ -1037,8 +1038,21 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
   OS.AddComment("  Num Records");
   OS.emitInt32(Recs.size());
 
-  OS.AddComment("Function Address");
-  OS.emitSymbolValue(FnSym, 8);
+  // 0x54: the function address is PC-relative (fn - <address of this field>).
+  // An absolute 8-byte address needs a dynamic relocation, which a PIC dylib
+  // link rejects for preemptible symbols (rust-lld: "R_X86_64_64 cannot be
+  // used against symbol ...; recompile with -fPIC" when ROG's rustc builds
+  // libstd) and costs one runtime relocation per blob even in executables.
+  // The PC-relative difference is a link-time constant: no relocations at
+  // all, and the section stays genuinely read-only.
+  OS.AddComment("Function Address (PC-relative)");
+  MCContext &Ctx = OS.getContext();
+  MCSymbol *Here = Ctx.createTempSymbol();
+  OS.emitLabel(Here);
+  OS.emitValue(
+      MCBinaryExpr::createSub(MCSymbolRefExpr::create(FnSym, Ctx),
+                              MCSymbolRefExpr::create(Here, Ctx), Ctx),
+      8);
   OS.AddComment("  Stack Size");
   OS.emitIntValue(FnInfo.StackSize, 8);
   OS.AddComment("  CSR area Lo (rbp-relative)");

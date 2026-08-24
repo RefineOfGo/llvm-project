@@ -664,6 +664,12 @@ public:
     RefEdgeList.insert(RefEdgeList.begin(), Extra.begin(), Extra.end());
   }
 
+  /// Remove regular reference edges matching Predicate. Thin-link clients may
+  /// use this before liveness when a language-level linker owns those edges.
+  template <typename Predicate> void removeRefsIf(Predicate ShouldRemove) {
+    llvm::erase_if(RefEdgeList, ShouldRemove);
+  }
+
   /// If this is an alias summary, returns the summary of the aliased object (a
   /// global variable or function), otherwise returns itself.
   GlobalValueSummary *getBaseObject();

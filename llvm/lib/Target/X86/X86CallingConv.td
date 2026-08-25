@@ -772,6 +772,14 @@ def CC_X86_64_ROG : CallingConv<[
   // Pointers are always passed in full 64-bit registers.
   CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
 
+  // The closure context (marked swiftself) is passed in R13, outside the
+  // normal integer argument sequence, matching the other x86-64 conventions.
+  // Callees that take no context simply ignore R13, so plain functions and
+  // closures share one indirect-call ABI. R13 (callee-saved, untouched by the
+  // stack-check prologue whose scratch is R11) survives both the morestack
+  // path and calls to non-closure helpers.
+  CCIfSwiftSelf<CCIfType<[i64], CCAssignToReg<[R13]>>>,
+
   // i128 can be either passed in two i64 registers, or on the stack, but
   // not split across register and stack. Handle this with a custom function.
   CCIfType<[i64], CCIfConsecutiveRegs<CCCustom<"CC_X86_64_ROG_I128">>>,

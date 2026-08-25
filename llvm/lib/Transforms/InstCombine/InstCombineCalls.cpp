@@ -4985,7 +4985,20 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
     }
   }
 
-  unsigned NumActualArgs = Call.arg_size();
+  // [ROG] Under the ROG calling convention the closure context travels in a
+  // dedicated register (swiftself -> R13) that a plain callee never reads: an
+  // indirect func-value call site passes a swiftself context argument even
+  // when the resolved callee takes none. Skip that leading argument when
+  // matching parameters positionally, so a devirtualized call keeps the
+  // runtime semantics instead of becoming a mismatched (UB) direct call.
+  unsigned ArgOffset = 0;
+  if ((Call.getCallingConv() == CallingConv::ROG ||
+       Call.getCallingConv() == CallingConv::ROG_Cold) &&
+      Call.arg_size() != 0 && CallerPAL.hasParamAttr(0, Attribute::SwiftSelf) &&
+      !Callee->getAttributes().hasAttrSomewhere(Attribute::SwiftSelf))
+    ArgOffset = 1;
+
+  unsigned NumActualArgs = Call.arg_size() - ArgOffset;
   unsigned NumCommonArgs = std::min(FT->getNumParams(), NumActualArgs);
 
   // Prevent us turning:
@@ -5000,7 +5013,7 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
       Callee->getAttributes().hasAttrSomewhere(Attribute::Preallocated))
     return false;
 
-  auto AI = Call.arg_begin();
+  auto AI = std::next(Call.arg_begin(), ArgOffset);
   for (unsigned i = 0, e = NumCommonArgs; i != e; ++i, ++AI) {
     Type *ParamTy = FT->getParamType(i);
     Type *ActTy = (*AI)->getType();
@@ -5009,20 +5022,20 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
       return false;   // Cannot transform this parameter value.
 
     // Check if there are any incompatible attributes we cannot drop safely.
-    if (AttrBuilder(FT->getContext(), CallerPAL.getParamAttrs(i))
+    if (AttrBuilder(FT->getContext(), CallerPAL.getParamAttrs(i + ArgOffset))
             .overlaps(AttributeFuncs::typeIncompatible(
-                ParamTy, CallerPAL.getParamAttrs(i),
+                ParamTy, CallerPAL.getParamAttrs(i + ArgOffset),
                 AttributeFuncs::ASK_UNSAFE_TO_DROP)))
       return false;   // Attribute not compatible with transformed value.
 
-    if (Call.isInAllocaArgument(i) ||
-        CallerPAL.hasParamAttr(i, Attribute::Preallocated))
+    if (Call.isInAllocaArgument(i + ArgOffset) ||
+        CallerPAL.hasParamAttr(i + ArgOffset, Attribute::Preallocated))
       return false; // Cannot transform to and from inalloca/preallocated.
 
-    if (CallerPAL.hasParamAttr(i, Attribute::SwiftError))
+    if (CallerPAL.hasParamAttr(i + ArgOffset, Attribute::SwiftError))
       return false;
 
-    if (CallerPAL.hasParamAttr(i, Attribute::ByVal) !=
+    if (CallerPAL.hasParamAttr(i + ArgOffset, Attribute::ByVal) !=
         Callee->getAttributes().hasParamAttr(i, Attribute::ByVal))
       return false; // Cannot transform to or from byval.
   }
@@ -5054,7 +5067,7 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
       AttributeFuncs::typeIncompatible(NewRetTy, CallerPAL.getRetAttrs()));
 
   LLVMContext &Ctx = Call.getContext();
-  AI = Call.arg_begin();
+  AI = std::next(Call.arg_begin(), ArgOffset);
   for (unsigned i = 0; i != NumCommonArgs; ++i, ++AI) {
     Type *ParamTy = FT->getParamType(i);
 
@@ -5066,9 +5079,10 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
     // Add any parameter attributes except the ones incompatible with the new
     // type. Note that we made sure all incompatible ones are safe to drop.
     AttributeMask IncompatibleAttrs = AttributeFuncs::typeIncompatible(
-        ParamTy, CallerPAL.getParamAttrs(i), AttributeFuncs::ASK_SAFE_TO_DROP);
-    ArgAttrs.push_back(
-        CallerPAL.getParamAttrs(i).removeAttributes(Ctx, IncompatibleAttrs));
+        ParamTy, CallerPAL.getParamAttrs(i + ArgOffset),
+        AttributeFuncs::ASK_SAFE_TO_DROP);
+    ArgAttrs.push_back(CallerPAL.getParamAttrs(i + ArgOffset)
+                           .removeAttributes(Ctx, IncompatibleAttrs));
   }
 
   // If the function takes more arguments than the call was taking, add them
@@ -5095,7 +5109,7 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
         Args.push_back(NewArg);
 
         // Add any parameter attributes.
-        ArgAttrs.push_back(CallerPAL.getParamAttrs(i));
+        ArgAttrs.push_back(CallerPAL.getParamAttrs(i + ArgOffset));
       }
     }
   }

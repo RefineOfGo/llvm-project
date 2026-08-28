@@ -25,6 +25,7 @@
 namespace llvm {
 
 class Module;
+class ThreadPoolStrategy;
 
 /// The function importer is automatically importing function from other modules
 /// based on the provided summary informations.
@@ -364,6 +365,18 @@ LLVM_ABI void ComputeCrossModuleImport(
         isPrevailing,
     FunctionImporter::ImportListsTy &ImportLists,
     DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists);
+
+/// Compute cross-module imports and exports using \p Parallelism for the
+/// import/export computation. This allows LTO clients to reuse the ThinLTO
+/// backend parallelism selected by the linker.
+LLVM_ABI void ComputeCrossModuleImport(
+    const ModuleSummaryIndex &Index,
+    const DenseMap<StringRef, GVSummaryMapTy> &ModuleToDefinedGVSummaries,
+    function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
+        isPrevailing,
+    FunctionImporter::ImportListsTy &ImportLists,
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists,
+    const ThreadPoolStrategy &Parallelism);
 
 /// PrevailingType enum used as a return type of callback passed
 /// to computeDeadSymbolsAndUpdateIndirectCalls. Yes and No values used when

@@ -40,6 +40,8 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/ThreadPool.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/Internalize.h"
@@ -48,12 +50,14 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include <cassert>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 using namespace llvm;
 
@@ -538,25 +542,26 @@ class ModuleImportsManager {
       const GVSummaryMapTy &DefinedGVSummaries,
       SmallVectorImpl<EdgeInfo> &Worklist, GlobalsImporter &GVImporter,
       FunctionImporter::ImportMapTy &ImportList,
-      FunctionImporter::ImportThresholdsTy &ImportThresholds);
+      FunctionImporter::ImportThresholdsTy &ImportThresholds,
+      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists) const;
 
   void computeImportForModuleWithPriorityFrontiers(
-      const GVSummaryMapTy &DefinedGVSummaries,
-      FunctionImporter::ImportMapTy &ImportList);
+      const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
+      FunctionImporter::ImportMapTy &ImportList,
+      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
+      ThreadPoolInterface *Pool) const;
 
 protected:
   function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
       IsPrevailing;
   const ModuleSummaryIndex &Index;
-  DenseMap<StringRef, FunctionImporter::ExportSetTy> *const ExportLists;
 
   ModuleImportsManager(
       function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
           IsPrevailing,
-      const ModuleSummaryIndex &Index,
-      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists = nullptr)
-      : IsPrevailing(IsPrevailing), Index(Index), ExportLists(ExportLists) {}
-  virtual bool canImport(ValueInfo VI) { return true; }
+      const ModuleSummaryIndex &Index)
+      : IsPrevailing(IsPrevailing), Index(Index) {}
+  virtual bool canImport(ValueInfo VI) const { return true; }
 
 public:
   virtual ~ModuleImportsManager() = default;
@@ -564,17 +569,16 @@ public:
   /// Given the list of globals defined in a module, compute the list of imports
   /// as well as the list of "exports", i.e. the list of symbols referenced from
   /// another module (that may require promotion).
-  virtual void
-  computeImportForModule(const GVSummaryMapTy &DefinedGVSummaries,
-                         StringRef ModName,
-                         FunctionImporter::ImportMapTy &ImportList);
+  virtual void computeImportForModule(
+      const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
+      FunctionImporter::ImportMapTy &ImportList,
+      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
+      ThreadPoolInterface *Pool) const;
 
   static std::unique_ptr<ModuleImportsManager>
   create(function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
              IsPrevailing,
-         const ModuleSummaryIndex &Index,
-         DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists =
-             nullptr);
+         const ModuleSummaryIndex &Index);
 };
 
 /// A ModuleImportsManager that operates based on a workload definition (see
@@ -591,10 +595,11 @@ class WorkloadImportsManager : public ModuleImportsManager {
   // just one instance of this function.
   DenseSet<ValueInfo> Roots;
 
-  void
-  computeImportForModule(const GVSummaryMapTy &DefinedGVSummaries,
-                         StringRef ModName,
-                         FunctionImporter::ImportMapTy &ImportList) override {
+  void computeImportForModule(
+      const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
+      FunctionImporter::ImportMapTy &ImportList,
+      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
+      ThreadPoolInterface *Pool) const override {
     StringRef Filename = ModName;
     if (CtxprofMoveRootsToOwnModule) {
       Filename = sys::path::filename(ModName);
@@ -606,16 +611,16 @@ class WorkloadImportsManager : public ModuleImportsManager {
     if (SetIter == Workloads.end()) {
       LLVM_DEBUG(dbgs() << "[Workload] " << ModName
                         << " does not contain the root of any context.\n");
-      return ModuleImportsManager::computeImportForModule(DefinedGVSummaries,
-                                                          ModName, ImportList);
+      return ModuleImportsManager::computeImportForModule(
+          DefinedGVSummaries, ModName, ImportList, ExportLists, Pool);
     }
     LLVM_DEBUG(dbgs() << "[Workload] " << ModName
                       << " contains the root(s) of context(s).\n");
 
     GlobalsImporter GVI(Index, DefinedGVSummaries, IsPrevailing, ImportList,
                         ExportLists);
-    auto &ValueInfos = SetIter->second;
-    for (auto &VI : llvm::make_early_inc_range(ValueInfos)) {
+    const auto &ValueInfos = SetIter->second;
+    for (const auto &VI : ValueInfos) {
       auto It = DefinedGVSummaries.find(VI.getGUID());
       if (It != DefinedGVSummaries.end() &&
           IsPrevailing(VI.getGUID(), It->second)) {
@@ -834,15 +839,14 @@ class WorkloadImportsManager : public ModuleImportsManager {
     }
   }
 
-  bool canImport(ValueInfo VI) override { return !Roots.contains(VI); }
+  bool canImport(ValueInfo VI) const override { return !Roots.contains(VI); }
 
 public:
   WorkloadImportsManager(
       function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
           IsPrevailing,
-      const ModuleSummaryIndex &Index,
-      DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists)
-      : ModuleImportsManager(IsPrevailing, Index, ExportLists) {
+      const ModuleSummaryIndex &Index)
+      : ModuleImportsManager(IsPrevailing, Index) {
     if (UseCtxProfile.empty() == WorkloadDefinitions.empty()) {
       report_fatal_error(
           "Pass only one of: -thinlto-pgo-ctx-prof or -thinlto-workload-def");
@@ -868,16 +872,14 @@ public:
 std::unique_ptr<ModuleImportsManager> ModuleImportsManager::create(
     function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
         IsPrevailing,
-    const ModuleSummaryIndex &Index,
-    DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists) {
+    const ModuleSummaryIndex &Index) {
   if (WorkloadDefinitions.empty() && UseCtxProfile.empty()) {
     LLVM_DEBUG(dbgs() << "[Workload] Using the regular imports manager.\n");
     return std::unique_ptr<ModuleImportsManager>(
-        new ModuleImportsManager(IsPrevailing, Index, ExportLists));
+        new ModuleImportsManager(IsPrevailing, Index));
   }
   LLVM_DEBUG(dbgs() << "[Workload] Using the contextual imports manager.\n");
-  return std::make_unique<WorkloadImportsManager>(IsPrevailing, Index,
-                                                  ExportLists);
+  return std::make_unique<WorkloadImportsManager>(IsPrevailing, Index);
 }
 
 static const char *
@@ -911,7 +913,8 @@ void ModuleImportsManager::computeImportForFunction(
     const GVSummaryMapTy &DefinedGVSummaries,
     SmallVectorImpl<EdgeInfo> &Worklist, GlobalsImporter &GVImporter,
     FunctionImporter::ImportMapTy &ImportList,
-    FunctionImporter::ImportThresholdsTy &ImportThresholds) {
+    FunctionImporter::ImportThresholdsTy &ImportThresholds,
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists) const {
   GVImporter.onImportingSummary(Summary);
   static int ImportCount = 0;
   for (const auto &Edge : Summary.calls()) {
@@ -1089,7 +1092,10 @@ void ModuleImportsManager::computeImportForFunction(
 
     const auto AdjThreshold = GetAdjustedThreshold(Threshold, IsHotCallsite);
 
-    ImportCount++;
+    // ImportCount is only used by the serial, test-only ImportCutoff mode.
+    // Avoid touching it during parallel import computation.
+    if (ImportCutoff >= 0)
+      ImportCount++;
 
     // Insert the newly imported function to the worklist.
     Worklist.emplace_back(ResolvedCalleeSummary, AdjThreshold);
@@ -1097,8 +1103,10 @@ void ModuleImportsManager::computeImportForFunction(
 }
 
 void ModuleImportsManager::computeImportForModuleWithPriorityFrontiers(
-    const GVSummaryMapTy &DefinedGVSummaries,
-    FunctionImporter::ImportMapTy &ImportList) {
+    const GVSummaryMapTy &DefinedGVSummaries, StringRef,
+    FunctionImporter::ImportMapTy &ImportList,
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
+    ThreadPoolInterface *Pool) const {
   using FrontierTy = std::map<unsigned, SmallVector<const FunctionSummary *, 0>,
                               std::greater<unsigned>>;
 
@@ -1166,11 +1174,15 @@ void ModuleImportsManager::computeImportForModuleWithPriorityFrontiers(
       return LHS.GUID < RHS.GUID;
     });
 
+    // Global reference discovery mutates the import and export sets. Keep it
+    // in the deterministic commit phase; only call-edge analysis is parallel.
     for (const FunctionImportWorkItem &Item : Active)
       GVI.onImportingSummary(*Item.Summary);
 
-    SmallVector<CalleeImportProposal, 0> Proposals;
-    for (const FunctionImportWorkItem &Item : Active) {
+    std::vector<SmallVector<CalleeImportProposal, 0>> ThreadResults(
+        Active.size());
+    auto CollectProposals = [&](size_t I) {
+      const FunctionImportWorkItem &Item = Active[I];
       unsigned EdgeOrdinal = 0;
       for (const auto &Edge : Item.Summary->calls()) {
         ValueInfo VI = Edge.first;
@@ -1207,12 +1219,35 @@ void ModuleImportsManager::computeImportForModuleWithPriorityFrontiers(
                 ? cast<FunctionSummary>(CalleeSummary->getBaseObject())
                 : nullptr;
 
-        Proposals.push_back(
+        ThreadResults[I].push_back(
             {VI, ResolvedCalleeSummary, SummaryForDeclImport,
              Item.Summary->modulePath(), Item.GUID, ThisEdgeOrdinal,
              AcceptThreshold, ExpandThreshold, Hotness});
       }
+    };
+
+    if (Pool && Pool->getMaxConcurrency() > 1 && Active.size() > 1) {
+      const size_t NumTasks =
+          std::min<size_t>(Active.size(), Pool->getMaxConcurrency() * 4);
+      const size_t ChunkSize = (Active.size() + NumTasks - 1) / NumTasks;
+      ThreadPoolTaskGroup Tasks(*Pool);
+      for (size_t Begin = 0; Begin < Active.size(); Begin += ChunkSize) {
+        const size_t End = std::min(Active.size(), Begin + ChunkSize);
+        Tasks.async([&, Begin, End] {
+          for (size_t I = Begin; I < End; ++I)
+            CollectProposals(I);
+        });
+      }
+      Tasks.wait();
+    } else {
+      for (size_t I = 0; I < Active.size(); ++I)
+        CollectProposals(I);
     }
+
+    SmallVector<CalleeImportProposal, 0> Proposals;
+    for (auto &Result : ThreadResults)
+      Proposals.append(std::make_move_iterator(Result.begin()),
+                       std::make_move_iterator(Result.end()));
 
     llvm::sort(Proposals, [](const CalleeImportProposal &LHS,
                              const CalleeImportProposal &RHS) {
@@ -1267,10 +1302,12 @@ void ModuleImportsManager::computeImportForModuleWithPriorityFrontiers(
 
 void ModuleImportsManager::computeImportForModule(
     const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
-    FunctionImporter::ImportMapTy &ImportList) {
+    FunctionImporter::ImportMapTy &ImportList,
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
+    ThreadPoolInterface *Pool) const {
   if (canUsePriorityFrontiers())
-    return computeImportForModuleWithPriorityFrontiers(DefinedGVSummaries,
-                                                       ImportList);
+    return computeImportForModuleWithPriorityFrontiers(
+        DefinedGVSummaries, ModName, ImportList, ExportLists, Pool);
 
   // Worklist contains the list of function imported in this module, for which
   // we will analyse the callees and may import further down the callgraph.
@@ -1298,7 +1335,8 @@ void ModuleImportsManager::computeImportForModule(
       continue;
     LLVM_DEBUG(dbgs() << "Initialize import for " << VI << "\n");
     computeImportForFunction(*FuncSummary, ImportInstrLimit, DefinedGVSummaries,
-                             Worklist, GVI, ImportList, ImportThresholds);
+                             Worklist, GVI, ImportList, ImportThresholds,
+                             ExportLists);
   }
 
   // Process the newly imported functions and add callees to the worklist.
@@ -1309,7 +1347,7 @@ void ModuleImportsManager::computeImportForModule(
 
     if (auto *FS = dyn_cast<FunctionSummary>(Summary))
       computeImportForFunction(*FS, Threshold, DefinedGVSummaries, Worklist,
-                               GVI, ImportList, ImportThresholds);
+                               GVI, ImportList, ImportThresholds, ExportLists);
   }
 
   // Print stats about functions considered but rejected for importing
@@ -1424,6 +1462,42 @@ static bool checkVariableImport(
 }
 #endif
 
+namespace {
+
+struct ModuleImportTask {
+  StringRef ModuleName;
+  const GVSummaryMapTy *DefinedGVSummaries;
+};
+
+struct ModuleImportResult {
+  FunctionImporter::ImportIDTable ImportIDs;
+  FunctionImporter::ImportMapTy ImportList;
+  DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists;
+
+  ModuleImportResult() : ImportList(ImportIDs) {}
+};
+
+struct ExportClosureTask {
+  FunctionImporter::ExportSetTy *Exports;
+  const GVSummaryMapTy *DefinedGVSummaries;
+};
+
+static bool
+shouldComputeImportsInParallel(size_t NumModules,
+                               const ThreadPoolStrategy &Parallelism) {
+  if (NumModules == 0 || Parallelism.compute_thread_count() <= 1 ||
+      ImportCutoff >= 0 || PrintImportFailures || ForceImportAll)
+    return false;
+#ifndef NDEBUG
+  // Keep LLVM_DEBUG output deterministic and avoid concurrent writes to dbgs().
+  if (DebugFlag)
+    return false;
+#endif
+  return true;
+}
+
+} // namespace
+
 /// Compute all the import and export for every module using the Index.
 void llvm::ComputeCrossModuleImport(
     const ModuleSummaryIndex &Index,
@@ -1432,28 +1506,122 @@ void llvm::ComputeCrossModuleImport(
         isPrevailing,
     FunctionImporter::ImportListsTy &ImportLists,
     DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists) {
-  auto MIS = ModuleImportsManager::create(isPrevailing, Index, &ExportLists);
-  // For each module that has function defined, compute the import/export lists.
-  for (const auto &DefinedGVSummaries : ModuleToDefinedGVSummaries) {
-    auto &ImportList = ImportLists[DefinedGVSummaries.first];
-    LLVM_DEBUG(dbgs() << "Computing import for Module '"
-                      << DefinedGVSummaries.first << "'\n");
-    MIS->computeImportForModule(DefinedGVSummaries.second,
-                                DefinedGVSummaries.first, ImportList);
+  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries, isPrevailing,
+                           ImportLists, ExportLists,
+                           heavyweight_hardware_concurrency(/*ThreadCount=*/1));
+}
+
+void llvm::ComputeCrossModuleImport(
+    const ModuleSummaryIndex &Index,
+    const DenseMap<StringRef, GVSummaryMapTy> &ModuleToDefinedGVSummaries,
+    function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
+        isPrevailing,
+    FunctionImporter::ImportListsTy &ImportLists,
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists,
+    const ThreadPoolStrategy &Parallelism) {
+  auto MIS = ModuleImportsManager::create(isPrevailing, Index);
+  std::unique_ptr<DefaultThreadPool> Pool;
+  SmallVector<ModuleImportTask, 0> ModuleTasks;
+  ModuleTasks.reserve(ModuleToDefinedGVSummaries.size());
+  for (const auto &[ModuleName, DefinedGVSummaries] :
+       ModuleToDefinedGVSummaries)
+    ModuleTasks.push_back({ModuleName, &DefinedGVSummaries});
+
+  auto ComputeImportForTask =
+      [&](const ModuleImportTask &Task,
+          FunctionImporter::ImportMapTy &ImportList,
+          DenseMap<StringRef, FunctionImporter::ExportSetTy> *TaskExportLists,
+          ThreadPoolInterface *Pool) {
+        LLVM_DEBUG(dbgs() << "Computing import for Module '" << Task.ModuleName
+                          << "'\n");
+        MIS->computeImportForModule(*Task.DefinedGVSummaries, Task.ModuleName,
+                                    ImportList, TaskExportLists, Pool);
+      };
+
+  auto ComputeImportsSerially = [&]() {
+    for (const ModuleImportTask &Task : ModuleTasks)
+      ComputeImportForTask(Task, ImportLists[Task.ModuleName], &ExportLists,
+                           /*Pool=*/nullptr);
+  };
+
+  {
+    TimeTraceScope TimeScope("Compute cross-module imports");
+    if (!shouldComputeImportsInParallel(ModuleTasks.size(), Parallelism)) {
+      ComputeImportsSerially();
+    } else {
+      Pool = std::make_unique<DefaultThreadPool>(Parallelism);
+      const size_t ThreadCount = Pool->getMaxConcurrency();
+      if (ThreadCount <= 1) {
+        ComputeImportsSerially();
+      } else {
+        // Local import ID tables are intentionally short-lived. The final
+        // ImportLists retain their central ID table, while batching bounds the
+        // temporary duplication needed to compute modules independently.
+        const size_t BatchSize = std::max<size_t>(1, ThreadCount * 4);
+        for (size_t BatchBegin = 0; BatchBegin < ModuleTasks.size();
+             BatchBegin += BatchSize) {
+          const size_t BatchEnd =
+              std::min(ModuleTasks.size(), BatchBegin + BatchSize);
+          const size_t NumBatchTasks = BatchEnd - BatchBegin;
+          std::vector<std::unique_ptr<ModuleImportResult>> Results(
+              NumBatchTasks);
+
+          // Seed each local import list from any imports supplied by the
+          // caller so addDefinition() preserves its existing return semantics.
+          for (size_t I = 0; I < NumBatchTasks; ++I) {
+            Results[I] = std::make_unique<ModuleImportResult>();
+            const auto &ExistingImports =
+                ImportLists.lookup(ModuleTasks[BatchBegin + I].ModuleName);
+            for (const auto &[FromModule, GUID, ImportType] : ExistingImports)
+              Results[I]->ImportList.addGUID(FromModule, GUID, ImportType);
+          }
+
+          ThreadPoolTaskGroup Tasks(*Pool);
+          const bool EnableIntraModuleParallelism =
+              ThreadCount > ModuleTasks.size();
+          for (size_t I = 0; I < NumBatchTasks; ++I)
+            Tasks.async([&, I] {
+              ModuleImportResult &Result = *Results[I];
+              ComputeImportForTask(ModuleTasks[BatchBegin + I],
+                                   Result.ImportList, &Result.ExportLists,
+                                   EnableIntraModuleParallelism ? Pool.get()
+                                                                : nullptr);
+            });
+          Tasks.wait();
+
+          // Merge in the original module order so task scheduling cannot
+          // affect the observable import and export sets.
+          for (size_t I = 0; I < NumBatchTasks; ++I) {
+            const ModuleImportTask &Task = ModuleTasks[BatchBegin + I];
+            ModuleImportResult &Result = *Results[I];
+            auto &ImportList = ImportLists[Task.ModuleName];
+            for (const auto &[FromModule, GUID, ImportType] : Result.ImportList)
+              ImportList.addGUID(FromModule, GUID, ImportType);
+            for (const auto &[FromModule, Exports] : Result.ExportLists)
+              ExportLists[FromModule].insert_range(Exports);
+          }
+        }
+      }
+    }
   }
 
-  // When computing imports we only added the variables and functions being
-  // imported to the export list. We also need to mark any references and calls
-  // they make as exported as well. We do this here, as it is more efficient
-  // since we may import the same values multiple times into different modules
-  // during the import computation.
-  for (auto &ELI : ExportLists) {
+  SmallVector<ExportClosureTask, 0> ExportClosureTasks;
+  ExportClosureTasks.reserve(ExportLists.size());
+  for (auto &[ModuleName, Exports] : ExportLists) {
+    auto DefinedIt = ModuleToDefinedGVSummaries.find(ModuleName);
+    assert(DefinedIt != ModuleToDefinedGVSummaries.end() &&
+           "exporting module is missing its defined summaries");
+    if (DefinedIt == ModuleToDefinedGVSummaries.end())
+      continue;
+    ExportClosureTasks.push_back({&Exports, &DefinedIt->second});
+  }
+
+  auto ComputeExportClosure = [&](const ExportClosureTask &Task) {
     // `NewExports` tracks the VI that gets exported because the full definition
     // of its user/referencer gets exported.
     FunctionImporter::ExportSetTy NewExports;
-    const auto &DefinedGVSummaries =
-        ModuleToDefinedGVSummaries.lookup(ELI.first);
-    for (auto &EI : ELI.second) {
+    const GVSummaryMapTy &DefinedGVSummaries = *Task.DefinedGVSummaries;
+    for (const auto &EI : *Task.Exports) {
       // Find the copy defined in the exporting module so that we can mark the
       // values it references in that specific definition as exported.
       // Below we will add all references and called values, without regard to
@@ -1489,7 +1657,38 @@ void llvm::ComputeCrossModuleImport(
       else
         ++EI;
     }
-    ELI.second.insert_range(NewExports);
+    Task.Exports->insert_range(NewExports);
+  };
+
+  // When computing imports we only added the variables and functions being
+  // imported to the export list. We also need to mark any references and calls
+  // they make as exported as well. We do this here, as it is more efficient
+  // since we may import the same values multiple times into different modules.
+  // Each task updates a distinct export set, so the import pool can be reused
+  // without synchronizing accesses to the outer ExportLists map.
+  {
+    TimeTraceScope TimeScope("Compute cross-module export closure");
+    if (!Pool || Pool->getMaxConcurrency() <= 1 ||
+        ExportClosureTasks.size() < 2) {
+      for (const ExportClosureTask &Task : ExportClosureTasks)
+        ComputeExportClosure(Task);
+    } else {
+      const size_t NumTasks = std::min<size_t>(ExportClosureTasks.size(),
+                                               Pool->getMaxConcurrency() * 4);
+      const size_t ChunkSize =
+          (ExportClosureTasks.size() + NumTasks - 1) / NumTasks;
+      ThreadPoolTaskGroup Tasks(*Pool);
+      for (size_t Begin = 0; Begin < ExportClosureTasks.size();
+           Begin += ChunkSize) {
+        const size_t End =
+            std::min(ExportClosureTasks.size(), Begin + ChunkSize);
+        Tasks.async([&, Begin, End] {
+          for (size_t I = Begin; I < End; ++I)
+            ComputeExportClosure(ExportClosureTasks[I]);
+        });
+      }
+      Tasks.wait();
+    }
   }
 
   assert(checkVariableImport(Index, ImportLists, ExportLists));
@@ -1561,7 +1760,8 @@ static void ComputeCrossModuleImportForModuleForTest(
   // Compute the import list for this module.
   LLVM_DEBUG(dbgs() << "Computing import for Module '" << ModulePath << "'\n");
   auto MIS = ModuleImportsManager::create(isPrevailing, Index);
-  MIS->computeImportForModule(FunctionSummaryMap, ModulePath, ImportList);
+  MIS->computeImportForModule(FunctionSummaryMap, ModulePath, ImportList,
+                              /*ExportLists=*/nullptr, /*Pool=*/nullptr);
 
 #ifndef NDEBUG
   dumpImportListForModule(Index, ModulePath, ImportList);

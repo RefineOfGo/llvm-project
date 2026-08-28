@@ -47,6 +47,8 @@
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include <cassert>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -341,6 +343,37 @@ namespace {
 
 using EdgeInfo = std::tuple<const FunctionSummary *, unsigned /* Threshold */>;
 
+struct FunctionImportWorkItem {
+  const FunctionSummary *Summary;
+  GlobalValue::GUID GUID;
+};
+
+struct CalleeImportProposal {
+  ValueInfo VI;
+  const FunctionSummary *CalleeSummary;
+  const GlobalValueSummary *SummaryForDeclImport;
+  StringRef CallerModulePath;
+  GlobalValue::GUID CallerGUID;
+  unsigned EdgeOrdinal;
+  unsigned AcceptThreshold;
+  unsigned ExpandThreshold;
+  CalleeInfo::HotnessType Hotness;
+};
+
+static bool canUsePriorityFrontiers() {
+  if (ImportCutoff >= 0 || PrintImportFailures || ForceImportAll)
+    return false;
+#ifndef NDEBUG
+  if (DebugFlag)
+    return false;
+#endif
+  // The descending-priority traversal settles a summary after its largest
+  // expansion threshold is known. This is only valid when traversing an edge
+  // cannot increase that threshold.
+  return ImportInstrFactor >= 0.0f && ImportInstrFactor <= 1.0f &&
+         ImportHotInstrFactor >= 0.0f && ImportHotInstrFactor <= 1.0f;
+}
+
 } // anonymous namespace
 
 FunctionImporter::ImportMapTy::AddDefinitionStatus
@@ -506,6 +539,10 @@ class ModuleImportsManager {
       SmallVectorImpl<EdgeInfo> &Worklist, GlobalsImporter &GVImporter,
       FunctionImporter::ImportMapTy &ImportList,
       FunctionImporter::ImportThresholdsTy &ImportThresholds);
+
+  void computeImportForModuleWithPriorityFrontiers(
+      const GVSummaryMapTy &DefinedGVSummaries,
+      FunctionImporter::ImportMapTy &ImportList);
 
 protected:
   function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
@@ -1059,9 +1096,182 @@ void ModuleImportsManager::computeImportForFunction(
   }
 }
 
+void ModuleImportsManager::computeImportForModuleWithPriorityFrontiers(
+    const GVSummaryMapTy &DefinedGVSummaries,
+    FunctionImporter::ImportMapTy &ImportList) {
+  using FrontierTy = std::map<unsigned, SmallVector<const FunctionSummary *, 0>,
+                              std::greater<unsigned>>;
+
+  FrontierTy Frontiers;
+  DenseMap<const FunctionSummary *, unsigned> BestExpandThresholds;
+  DenseMap<const FunctionSummary *, GlobalValue::GUID> SummaryGUIDs;
+  DenseSet<const FunctionSummary *> SettledSummaries;
+  DenseMap<GlobalValue::GUID, const FunctionSummary *> SelectedCallees;
+
+  auto Enqueue = [&](const FunctionSummary *Summary, GlobalValue::GUID GUID,
+                     unsigned Threshold) {
+    auto GUIDIt = SummaryGUIDs.try_emplace(Summary, GUID).first;
+    GUIDIt->second = std::min(GUIDIt->second, GUID);
+
+    auto [It, Inserted] = BestExpandThresholds.try_emplace(Summary, Threshold);
+    if (!Inserted && Threshold <= It->second)
+      return;
+
+    // A settled summary was processed at a threshold at least as large as any
+    // threshold that can be discovered later because frontiers are drained in
+    // descending order and edge evolution factors do not exceed one.
+    assert(!SettledSummaries.contains(Summary) &&
+           "settled summary received a larger expansion threshold");
+    if (SettledSummaries.contains(Summary))
+      return;
+
+    It->second = Threshold;
+    Frontiers[Threshold].push_back(Summary);
+  };
+
+  // All live functions defined in the destination module are traversal roots.
+  for (const auto &[GUID, Summary] : DefinedGVSummaries) {
+    if (!Index.isGlobalValueLive(Summary))
+      continue;
+    if (auto *FS = dyn_cast<FunctionSummary>(Summary->getBaseObject()))
+      Enqueue(FS, GUID, ImportInstrLimit);
+  }
+
+  GlobalsImporter GVI(Index, DefinedGVSummaries, IsPrevailing, ImportList,
+                      ExportLists);
+
+  while (!Frontiers.empty()) {
+    auto FrontierIt = Frontiers.begin();
+    const unsigned FrontierThreshold = FrontierIt->first;
+    auto Pending = std::move(FrontierIt->second);
+    Frontiers.erase(FrontierIt);
+
+    SmallVector<FunctionImportWorkItem, 0> Active;
+    Active.reserve(Pending.size());
+    for (const FunctionSummary *Summary : Pending) {
+      auto BestIt = BestExpandThresholds.find(Summary);
+      // A summary can be enqueued by several incoming edges. Ignore entries
+      // superseded by a larger threshold and equal-priority duplicates.
+      if (BestIt == BestExpandThresholds.end() ||
+          BestIt->second != FrontierThreshold ||
+          !SettledSummaries.insert(Summary).second)
+        continue;
+      Active.push_back({Summary, SummaryGUIDs.lookup(Summary)});
+    }
+
+    llvm::sort(Active, [](const FunctionImportWorkItem &LHS,
+                          const FunctionImportWorkItem &RHS) {
+      if (LHS.Summary->modulePath() != RHS.Summary->modulePath())
+        return LHS.Summary->modulePath() < RHS.Summary->modulePath();
+      return LHS.GUID < RHS.GUID;
+    });
+
+    for (const FunctionImportWorkItem &Item : Active)
+      GVI.onImportingSummary(*Item.Summary);
+
+    SmallVector<CalleeImportProposal, 0> Proposals;
+    for (const FunctionImportWorkItem &Item : Active) {
+      unsigned EdgeOrdinal = 0;
+      for (const auto &Edge : Item.Summary->calls()) {
+        ValueInfo VI = Edge.first;
+        const unsigned ThisEdgeOrdinal = EdgeOrdinal++;
+        if (DefinedGVSummaries.count(VI.getGUID()) || !canImport(VI))
+          continue;
+
+        auto GetBonusMultiplier = [](CalleeInfo::HotnessType Hotness) {
+          if (Hotness == CalleeInfo::HotnessType::Hot)
+            return static_cast<float>(ImportHotMultiplier);
+          if (Hotness == CalleeInfo::HotnessType::Cold)
+            return static_cast<float>(ImportColdMultiplier);
+          if (Hotness == CalleeInfo::HotnessType::Critical)
+            return static_cast<float>(ImportCriticalMultiplier);
+          return 1.0f;
+        };
+
+        const auto Hotness = Edge.second.getHotness();
+        const unsigned AcceptThreshold = static_cast<unsigned>(
+            FrontierThreshold * GetBonusMultiplier(Hotness));
+        const bool IsHotCallsite = Hotness == CalleeInfo::HotnessType::Hot;
+        const unsigned ExpandThreshold = static_cast<unsigned>(
+            FrontierThreshold * (IsHotCallsite
+                                     ? static_cast<float>(ImportHotInstrFactor)
+                                     : static_cast<float>(ImportInstrFactor)));
+
+        FunctionImporter::ImportFailureReason Reason{};
+        const GlobalValueSummary *SummaryForDeclImport = nullptr;
+        const GlobalValueSummary *CalleeSummary = selectCallee(
+            Index, VI.getSummaryList(), AcceptThreshold,
+            Item.Summary->modulePath(), SummaryForDeclImport, Reason);
+        const FunctionSummary *ResolvedCalleeSummary =
+            CalleeSummary
+                ? cast<FunctionSummary>(CalleeSummary->getBaseObject())
+                : nullptr;
+
+        Proposals.push_back(
+            {VI, ResolvedCalleeSummary, SummaryForDeclImport,
+             Item.Summary->modulePath(), Item.GUID, ThisEdgeOrdinal,
+             AcceptThreshold, ExpandThreshold, Hotness});
+      }
+    }
+
+    llvm::sort(Proposals, [](const CalleeImportProposal &LHS,
+                             const CalleeImportProposal &RHS) {
+      if (LHS.VI.getGUID() != RHS.VI.getGUID())
+        return LHS.VI.getGUID() < RHS.VI.getGUID();
+      if (LHS.ExpandThreshold != RHS.ExpandThreshold)
+        return LHS.ExpandThreshold > RHS.ExpandThreshold;
+      if (LHS.AcceptThreshold != RHS.AcceptThreshold)
+        return LHS.AcceptThreshold > RHS.AcceptThreshold;
+      if (LHS.CallerModulePath != RHS.CallerModulePath)
+        return LHS.CallerModulePath < RHS.CallerModulePath;
+      if (LHS.CallerGUID != RHS.CallerGUID)
+        return LHS.CallerGUID < RHS.CallerGUID;
+      return LHS.EdgeOrdinal < RHS.EdgeOrdinal;
+    });
+
+    for (const CalleeImportProposal &Proposal : Proposals) {
+      const GlobalValue::GUID GUID = Proposal.VI.getGUID();
+      const FunctionSummary *SelectedSummary = SelectedCallees.lookup(GUID);
+      if (SelectedSummary) {
+        if (SelectedSummary->fflags().NoInline ||
+            (!SelectedSummary->fflags().AlwaysInline &&
+             SelectedSummary->instCount() > Proposal.AcceptThreshold))
+          continue;
+        Enqueue(SelectedSummary, GUID, Proposal.ExpandThreshold);
+        continue;
+      }
+
+      if (!Proposal.CalleeSummary) {
+        if (ImportDeclaration && Proposal.SummaryForDeclImport)
+          ImportList.maybeAddDeclaration(
+              Proposal.SummaryForDeclImport->modulePath(), GUID);
+        continue;
+      }
+
+      SelectedCallees[GUID] = Proposal.CalleeSummary;
+      StringRef ExportModulePath = Proposal.CalleeSummary->modulePath();
+      if (ImportList.addDefinition(ExportModulePath, GUID) !=
+          FunctionImporter::ImportMapTy::AddDefinitionStatus::NoChange) {
+        NumImportedFunctionsThinLink++;
+        if (Proposal.Hotness == CalleeInfo::HotnessType::Hot)
+          NumImportedHotFunctionsThinLink++;
+        if (Proposal.Hotness == CalleeInfo::HotnessType::Critical)
+          NumImportedCriticalFunctionsThinLink++;
+      }
+      if (ExportLists)
+        (*ExportLists)[ExportModulePath].insert(Proposal.VI);
+      Enqueue(Proposal.CalleeSummary, GUID, Proposal.ExpandThreshold);
+    }
+  }
+}
+
 void ModuleImportsManager::computeImportForModule(
     const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
     FunctionImporter::ImportMapTy &ImportList) {
+  if (canUsePriorityFrontiers())
+    return computeImportForModuleWithPriorityFrontiers(DefinedGVSummaries,
+                                                       ImportList);
+
   // Worklist contains the list of function imported in this module, for which
   // we will analyse the callees and may import further down the callgraph.
   SmallVector<EdgeInfo, 128> Worklist;

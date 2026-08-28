@@ -521,6 +521,21 @@ private:
     DenseMap<GlobalValue::GUID, StringRef> PrevailingModuleForGUID;
   } ThinLTO;
 
+  struct PendingModuleSummary {
+    struct ResolutionUpdate {
+      GlobalValue::GUID GUID;
+      bool LinkerRedefined;
+      bool DSOLocal;
+    };
+
+    std::unique_ptr<ModuleSummaryIndexReader> Reader;
+    StringRef ModulePath;
+    SmallVector<ResolutionUpdate, 0> ResolutionUpdates;
+  };
+  std::vector<PendingModuleSummary> PendingModuleSummaries;
+
+  Error readAndMergeModuleSummaries();
+
   // The global resolution for a particular (mangled) symbol name. This is in
   // particular necessary to track whether each symbol can be internalized.
   // Because any input file may introduce a new cross-partition reference, we

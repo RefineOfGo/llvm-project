@@ -35,6 +35,7 @@ class Module;
 class MemoryBuffer;
 class Metadata;
 class ModuleSummaryIndex;
+class ModuleSummaryIndexReader;
 class Type;
 class Value;
 
@@ -166,6 +167,33 @@ struct ParserCallbacks {
     LLVM_ABI Error
     readSummary(ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
                 std::function<bool(GlobalValue::GUID)> IsPrevailing = nullptr);
+
+    /// Prepare to parse this module's summary into CombinedIndex. Preparation
+    /// performs the serial work needed to intern values in CombinedIndex. The
+    /// returned reader can then parse independently on another thread, and its
+    /// results can be merged later in a deterministic order.
+    LLVM_ABI Expected<std::unique_ptr<ModuleSummaryIndexReader>> prepareSummary(
+        ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
+        std::function<bool(GlobalValue::GUID)> IsPrevailing = nullptr);
+  };
+
+  /// A prepared module summary parse. Different readers targeting the same
+  /// index may call read() concurrently. merge() must be called serially, in
+  /// input order, after read() succeeds.
+  class ModuleSummaryIndexReader {
+    struct Impl;
+    std::unique_ptr<Impl> P;
+
+    explicit ModuleSummaryIndexReader(std::unique_ptr<Impl> P);
+    friend class BitcodeModule;
+
+  public:
+    LLVM_ABI ~ModuleSummaryIndexReader();
+    ModuleSummaryIndexReader(ModuleSummaryIndexReader &&) = delete;
+    ModuleSummaryIndexReader &operator=(ModuleSummaryIndexReader &&) = delete;
+
+    LLVM_ABI Error read();
+    LLVM_ABI void merge();
   };
 
   struct BitcodeFileContents {

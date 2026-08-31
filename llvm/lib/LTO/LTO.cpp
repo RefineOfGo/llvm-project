@@ -17,6 +17,7 @@
 #include "llvm/ADT/StableHashing.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/StackSafetyAnalysis.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -921,8 +922,13 @@ LTO::addModule(InputFile &Input, ArrayRef<SymbolResolution> InputRes,
 
   // Regular LTO module summaries are added to a dummy module that represents
   // the combined regular LTO module.
-  if (Error Err = BM.readSummary(ThinLTO.CombinedIndex, ""))
-    return Err;
+  Expected<std::unique_ptr<ModuleSummaryIndexReader>> SummaryReader =
+      BM.createSummaryReader(ThinLTO.CombinedIndex, "");
+  if (!SummaryReader)
+    return SummaryReader.takeError();
+  PendingModuleSummaries.push_back(
+      {std::move(*SummaryReader), /*IRSpecifiedGUIDs=*/nullptr,
+       /*ModulePath=*/"", {}});
   RegularLTO.ModsWithSummaries.push_back(std::move(ModOrErr->first));
   return Res;
 }
@@ -1185,67 +1191,51 @@ LTO::addThinLTO(BitcodeModule BM, ArrayRef<InputFile::Symbol> Syms,
   llvm::TimeTraceScope timeScope("LTO add thin LTO");
   const auto BMID = BM.getModuleIdentifier();
   ArrayRef<SymbolResolution> ResTmp = Res;
-  DenseSet<StringRef> Prevailing;
+  auto Prevailing = std::make_shared<StringSet<>>();
   for (const InputFile::Symbol &Sym : Syms) {
     assert(!ResTmp.empty());
     const SymbolResolution &R = ResTmp.consume_front();
     if (!Sym.getIRName().empty() && R.Prevailing)
-      Prevailing.insert(Sym.getIRName());
+      Prevailing->insert(Sym.getIRName());
   }
 
   // Track the GUIDs stored in the bitcode GUID table.
-  StringMap<GlobalValue::GUID> IRSpecifiedGUIDs;
-  if (Error Err = BM.readSummary(
+  auto IRSpecifiedGUIDs =
+      std::make_shared<StringMap<GlobalValue::GUID>>();
+  Expected<std::unique_ptr<ModuleSummaryIndexReader>> SummaryReader =
+      BM.createSummaryReader(
           ThinLTO.CombinedIndex, BMID,
-          [&](StringRef Name) { return (Prevailing.count(Name) > 0); },
-          [&](ValueInfo VI) {
-            auto IT = IRSpecifiedGUIDs.insert({VI.name(), VI.getGUID()});
+          [Prevailing](StringRef Name) {
+            return Prevailing->contains(Name);
+          },
+          [this, Prevailing, IRSpecifiedGUIDs](ValueInfo VI) {
+            auto IT = IRSpecifiedGUIDs->insert({VI.name(), VI.getGUID()});
             (void)IT;
             assert(IT.second);
             if (auto GRIt = GlobalResolutions->find(VI.name());
                 GRIt != GlobalResolutions->end() &&
-                Prevailing.count(VI.name())) {
+                Prevailing->contains(VI.name())) {
               GRIt->second.setGUID(VI.getGUID());
             }
-          }))
-    return Err;
+          });
+  if (!SummaryReader)
+    return SummaryReader.takeError();
+  PendingModuleSummary Pending{std::move(*SummaryReader), IRSpecifiedGUIDs,
+                               BMID, {}};
   LLVM_DEBUG(dbgs() << "Module " << BMID << "\n");
 
   for (const InputFile::Symbol &Sym : Syms) {
     assert(!Res.empty());
     const SymbolResolution &R = Res.consume_front();
-    auto GUIDIter = IRSpecifiedGUIDs.find(Sym.getIRName());
-    // The bitcode GUID table might not be present if this is an old bitcode
-    // file. For backwards-compatibility, just compute the GUID now in that
-    // case.
-    auto GUID =
-        GUIDIter == IRSpecifiedGUIDs.end()
-            ? GlobalValue::getGUIDAssumingExternalLinkage(
-                  GlobalValue::getGlobalIdentifier(
-                      Sym.getIRName(), GlobalValue::ExternalLinkage, ""))
-            : GUIDIter->second;
     if (!Sym.getIRName().empty() &&
-        (R.Prevailing || R.FinalDefinitionInLinkageUnit)) {
-      if (R.Prevailing) {
-        ThinLTO.setPrevailingModuleForGUID(GUID, BMID);
-        // For linker redefined symbols (via --wrap or --defsym) we want to
-        // switch the linkage to `weak` to prevent IPOs from happening.
-        // Find the summary in the module for this very GV and record the new
-        // linkage so that we can switch it when we import the GV.
-        if (R.LinkerRedefined)
-          if (auto *S = ThinLTO.CombinedIndex.findSummaryInModule(GUID, BMID))
-            S->setLinkage(GlobalValue::WeakAnyLinkage);
-      }
-
-      // If the linker resolved the symbol to a local definition then mark it
-      // as local in the summary for the module we are adding.
-      if (R.FinalDefinitionInLinkageUnit) {
-        if (auto *S = ThinLTO.CombinedIndex.findSummaryInModule(GUID, BMID)) {
-          S->setDSOLocal(true);
-        }
-      }
-    }
+        (R.Prevailing || R.FinalDefinitionInLinkageUnit))
+      Pending.ResolutionUpdates.push_back(
+          {Sym.getIRName().str(), static_cast<bool>(R.Prevailing),
+           R.Prevailing && R.LinkerRedefined,
+           static_cast<bool>(R.FinalDefinitionInLinkageUnit)});
   }
+
+  PendingModuleSummaries.push_back(std::move(Pending));
 
   if (!ThinLTO.ModuleMap.insert({BMID, BM}).second)
     return make_error<StringError>(
@@ -1320,10 +1310,121 @@ Error LTO::checkPartiallySplit() {
   return Error::success();
 }
 
+Error LTO::readAndMergeModuleSummaries() {
+  if (PendingModuleSummaries.empty())
+    return Error::success();
+
+  llvm::TimeTraceScope TimeScope("LTO read and merge module summaries");
+
+  // Scanning only records reader-local preparation data, so different modules
+  // can be scanned concurrently without mutating the combined index. Publish
+  // bounded batches to avoid retaining preparation data for every input at
+  // once. No summary parsing starts until all batches have been published.
+  if (PendingModuleSummaries.size() == 1) {
+    {
+      llvm::TimeTraceScope ScanTimeScope("LTO scan module summaries");
+      if (Error Err = PendingModuleSummaries.front().Reader->scan())
+        return Err;
+    }
+    {
+      llvm::TimeTraceScope PublishTimeScope(
+          "LTO publish module summary preparations");
+      PendingModuleSummaries.front().Reader->publish();
+    }
+  } else {
+    DefaultThreadPool Pool(ThinLTO.Backend.getParallelism());
+    const size_t BatchSize = std::max<size_t>(1, 4 * Pool.getMaxConcurrency());
+    for (size_t BatchBegin = 0; BatchBegin < PendingModuleSummaries.size();
+         BatchBegin += BatchSize) {
+      const size_t BatchEnd =
+          std::min(BatchBegin + BatchSize, PendingModuleSummaries.size());
+      std::vector<std::optional<Error>> ScanErrors(BatchEnd - BatchBegin);
+
+      {
+        llvm::TimeTraceScope ScanTimeScope("LTO scan module summaries");
+        for (size_t I = BatchBegin; I != BatchEnd; ++I)
+          Pool.async([&, I] {
+            if (Error Err = PendingModuleSummaries[I].Reader->scan())
+              ScanErrors[I - BatchBegin].emplace(std::move(Err));
+          });
+        Pool.wait();
+      }
+
+      Error ScanError = Error::success();
+      for (std::optional<Error> &Err : ScanErrors)
+        if (Err)
+          ScanError = joinErrors(std::move(ScanError), std::move(*Err));
+      if (ScanError)
+        return ScanError;
+
+      llvm::TimeTraceScope PublishTimeScope(
+          "LTO publish module summary preparations");
+      for (size_t I = BatchBegin; I != BatchEnd; ++I)
+        PendingModuleSummaries[I].Reader->publish();
+    }
+  }
+
+  if (PendingModuleSummaries.size() == 1) {
+    if (Error Err = PendingModuleSummaries.front().Reader->read())
+      return Err;
+  } else {
+    DefaultThreadPool Pool(ThinLTO.Backend.getParallelism());
+    std::vector<std::optional<Error>> ParseErrors(
+        PendingModuleSummaries.size());
+
+    for (size_t I = 0; I != PendingModuleSummaries.size(); ++I)
+      Pool.async([&, I] {
+        if (Error Err = PendingModuleSummaries[I].Reader->read())
+          ParseErrors[I].emplace(std::move(Err));
+      });
+    Pool.wait();
+
+    Error ParseError = Error::success();
+    for (std::optional<Error> &Err : ParseErrors)
+      if (Err)
+        ParseError = joinErrors(std::move(ParseError), std::move(*Err));
+    if (ParseError)
+      return ParseError;
+  }
+
+  // Publishing remains serial and follows input order. Besides preserving the
+  // historical SummaryList order, this makes output independent of task
+  // scheduling.
+  for (PendingModuleSummary &Pending : PendingModuleSummaries) {
+    Pending.Reader->merge();
+    for (const PendingModuleSummary::ResolutionUpdate &Update :
+         Pending.ResolutionUpdates) {
+      auto GUIDIter = Pending.IRSpecifiedGUIDs->find(Update.IRName);
+      // The bitcode GUID table might not be present if this is an old bitcode
+      // file. For backwards-compatibility, compute the GUID in that case.
+      GlobalValue::GUID GUID =
+          GUIDIter == Pending.IRSpecifiedGUIDs->end()
+              ? GlobalValue::getGUIDAssumingExternalLinkage(
+                    GlobalValue::getGlobalIdentifier(
+                        Update.IRName, GlobalValue::ExternalLinkage, ""))
+              : GUIDIter->second;
+      if (Update.Prevailing)
+        ThinLTO.setPrevailingModuleForGUID(GUID, Pending.ModulePath);
+      if (auto *S = ThinLTO.CombinedIndex.findSummaryInModule(
+              GUID, Pending.ModulePath)) {
+        if (Update.LinkerRedefined)
+          S->setLinkage(GlobalValue::WeakAnyLinkage);
+        if (Update.DSOLocal)
+          S->setDSOLocal(true);
+      }
+    }
+  }
+  PendingModuleSummaries.clear();
+  return Error::success();
+}
+
 Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
   // Call the base class cleanup() explicitly since run() may be invoked on a
   // derived LTO object.
   llvm::scope_exit CleanUp([this]() { LTO::cleanup(); });
+
+  if (Error Err = readAndMergeModuleSummaries())
+    return Err;
 
   // Compute "dead" symbols, we don't want to import/export these!
   DenseSet<GlobalValue::GUID> GUIDPreservedSymbols;

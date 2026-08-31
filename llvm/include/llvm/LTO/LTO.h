@@ -22,6 +22,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/ModuleSummaryIndex.h"
 #include "llvm/LTO/Config.h"
@@ -521,6 +522,23 @@ protected:
   } ThinLTO;
 
 private:
+  struct PendingModuleSummary {
+    struct ResolutionUpdate {
+      std::string IRName;
+      bool Prevailing;
+      bool LinkerRedefined;
+      bool DSOLocal;
+    };
+
+    std::unique_ptr<ModuleSummaryIndexReader> Reader;
+    std::shared_ptr<StringMap<GlobalValue::GUID>> IRSpecifiedGUIDs;
+    StringRef ModulePath;
+    SmallVector<ResolutionUpdate, 0> ResolutionUpdates;
+  };
+  std::vector<PendingModuleSummary> PendingModuleSummaries;
+
+  Error readAndMergeModuleSummaries();
+
   // The global resolution for a particular (mangled) symbol name. This is in
   // particular necessary to track whether each symbol can be internalized.
   // Because any input file may introduce a new cross-partition reference, we

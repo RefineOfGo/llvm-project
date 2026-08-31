@@ -35,6 +35,7 @@ class Module;
 class MemoryBuffer;
 class Metadata;
 class ModuleSummaryIndex;
+class ModuleSummaryIndexReader;
 class Type;
 class Value;
 
@@ -166,6 +167,43 @@ struct ParserCallbacks {
     LLVM_ABI Error
     readSummary(ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
                 std::function<bool(GlobalValue::GUID)> IsPrevailing = nullptr);
+
+    /// Create a reader for this module's summary without scanning the module or
+    /// modifying CombinedIndex. Different readers may scan concurrently. Each
+    /// successful scan must be published serially before any reader is read.
+    LLVM_ABI Expected<std::unique_ptr<ModuleSummaryIndexReader>>
+    createSummaryReader(
+        ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
+        std::function<bool(GlobalValue::GUID)> IsPrevailing = nullptr);
+
+    /// Prepare to parse this module's summary into CombinedIndex. This is the
+    /// synchronous compatibility entry point, equivalent to creating a reader,
+    /// scanning it, and publishing its preparation.
+    LLVM_ABI Expected<std::unique_ptr<ModuleSummaryIndexReader>> prepareSummary(
+        ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
+        std::function<bool(GlobalValue::GUID)> IsPrevailing = nullptr);
+  };
+
+  /// A staged module summary parse. Different readers targeting the same index
+  /// may call scan() concurrently. publish() must then be called serially, in
+  /// input order, for every reader before read() is called concurrently.
+  /// merge() must also be called serially in input order after read() succeeds.
+  class ModuleSummaryIndexReader {
+    struct Impl;
+    std::unique_ptr<Impl> P;
+
+    explicit ModuleSummaryIndexReader(std::unique_ptr<Impl> P);
+    friend class BitcodeModule;
+
+  public:
+    LLVM_ABI ~ModuleSummaryIndexReader();
+    ModuleSummaryIndexReader(ModuleSummaryIndexReader &&) = delete;
+    ModuleSummaryIndexReader &operator=(ModuleSummaryIndexReader &&) = delete;
+
+    LLVM_ABI Error scan();
+    LLVM_ABI void publish();
+    LLVM_ABI Error read();
+    LLVM_ABI void merge();
   };
 
   struct BitcodeFileContents {

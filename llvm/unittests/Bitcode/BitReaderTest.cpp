@@ -257,6 +257,52 @@ TEST(BitReaderTest, MaterializeFunctionsForBlockAddrInFunctionAfter) {
   EXPECT_FALSE(verifyModule(*M, &dbgs()));
 }
 
+TEST(BitReaderTest, StagedSummaryPreparation) {
+  SmallString<1024> Mem;
+  LLVMContext Context;
+  std::unique_ptr<Module> M =
+      parseAssembly(Context, "source_filename = \"summary.c\"\n"
+                             "define void @f() {\n"
+                             "  ret void\n"
+                             "}\n");
+
+  ModuleSummaryIndex PerModuleIndex(/*HaveGVs=*/true);
+  SmallVector<FunctionSummary::EdgeTy, 0> Edges;
+  auto Summary = std::make_unique<FunctionSummary>(
+      FunctionSummary::makeDummyFunctionSummary(std::move(Edges)));
+  PerModuleIndex.addGlobalValueSummary(*M->getFunction("f"),
+                                       std::move(Summary));
+  raw_svector_ostream OS(Mem);
+  WriteBitcodeToFile(*M, OS, /*ShouldPreserveUseListOrder=*/false,
+                     &PerModuleIndex);
+
+  BitcodeFileContents Contents = cantFail(
+      getBitcodeFileContents(MemoryBufferRef(Mem.str(), "summary.bc")));
+  ASSERT_EQ(Contents.Mods.size(), 1u);
+
+  ModuleSummaryIndex CombinedIndex(/*HaveGVs=*/false);
+  std::unique_ptr<ModuleSummaryIndexReader> Reader = cantFail(
+      Contents.Mods.front().createSummaryReader(CombinedIndex, "summary.bc"));
+
+  EXPECT_EQ(CombinedIndex.begin(), CombinedIndex.end());
+  EXPECT_TRUE(CombinedIndex.modulePaths().empty());
+  cantFail(Reader->scan());
+  EXPECT_EQ(CombinedIndex.begin(), CombinedIndex.end());
+  EXPECT_TRUE(CombinedIndex.modulePaths().empty());
+
+  Reader->publish();
+  ValueInfo VI = CombinedIndex.getValueInfo(
+      GlobalValue::getGUIDAssumingExternalLinkage("f"));
+  ASSERT_TRUE(VI);
+  EXPECT_TRUE(VI.getSummaryList().empty());
+  EXPECT_EQ(CombinedIndex.modulePaths().count("summary.bc"), 1u);
+
+  cantFail(Reader->read());
+  EXPECT_TRUE(VI.getSummaryList().empty());
+  Reader->merge();
+  EXPECT_EQ(VI.getSummaryList().size(), 1u);
+}
+
 // Helper function to convert type metadata to a string for testing
 static std::string mdToString(Metadata *MD) {
   std::string S;

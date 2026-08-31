@@ -832,7 +832,7 @@ LTO::addModule(InputFile &Input, ArrayRef<SymbolResolution> InputRes,
   // Regular LTO module summaries are added to a dummy module that represents
   // the combined regular LTO module.
   Expected<std::unique_ptr<ModuleSummaryIndexReader>> SummaryReader =
-      BM.prepareSummary(ThinLTO.CombinedIndex, "");
+      BM.createSummaryReader(ThinLTO.CombinedIndex, "");
   if (!SummaryReader)
     return SummaryReader.takeError();
   PendingModuleSummaries.push_back(
@@ -1110,10 +1110,10 @@ LTO::addThinLTO(BitcodeModule BM, ArrayRef<InputFile::Symbol> Syms,
   }
 
   Expected<std::unique_ptr<ModuleSummaryIndexReader>> SummaryReader =
-      BM.prepareSummary(ThinLTO.CombinedIndex, BMID,
-                        [this, BMID](GlobalValue::GUID GUID) {
-                          return ThinLTO.isPrevailingModuleForGUID(GUID, BMID);
-                        });
+      BM.createSummaryReader(
+          ThinLTO.CombinedIndex, BMID, [this, BMID](GlobalValue::GUID GUID) {
+            return ThinLTO.isPrevailingModuleForGUID(GUID, BMID);
+          });
   if (!SummaryReader)
     return SummaryReader.takeError();
   PendingModuleSummary Pending{std::move(*SummaryReader), BMID, {}};
@@ -1217,6 +1217,55 @@ Error LTO::readAndMergeModuleSummaries() {
     return Error::success();
 
   llvm::TimeTraceScope TimeScope("LTO read and merge module summaries");
+
+  // Scanning only records reader-local preparation data, so different modules
+  // can be scanned concurrently without mutating the combined index. Publish
+  // bounded batches to avoid retaining preparation data for every input at
+  // once. No summary parsing starts until all batches have been published.
+  if (PendingModuleSummaries.size() == 1) {
+    {
+      llvm::TimeTraceScope ScanTimeScope("LTO scan module summaries");
+      if (Error Err = PendingModuleSummaries.front().Reader->scan())
+        return Err;
+    }
+    {
+      llvm::TimeTraceScope PublishTimeScope(
+          "LTO publish module summary preparations");
+      PendingModuleSummaries.front().Reader->publish();
+    }
+  } else {
+    DefaultThreadPool Pool(ThinLTO.Backend.getParallelism());
+    const size_t BatchSize = std::max<size_t>(1, 4 * Pool.getMaxConcurrency());
+    for (size_t BatchBegin = 0; BatchBegin < PendingModuleSummaries.size();
+         BatchBegin += BatchSize) {
+      const size_t BatchEnd =
+          std::min(BatchBegin + BatchSize, PendingModuleSummaries.size());
+      std::vector<std::optional<Error>> ScanErrors(BatchEnd - BatchBegin);
+
+      {
+        llvm::TimeTraceScope ScanTimeScope("LTO scan module summaries");
+        for (size_t I = BatchBegin; I != BatchEnd; ++I)
+          Pool.async([&, I] {
+            if (Error Err = PendingModuleSummaries[I].Reader->scan())
+              ScanErrors[I - BatchBegin].emplace(std::move(Err));
+          });
+        Pool.wait();
+      }
+
+      Error ScanError = Error::success();
+      for (std::optional<Error> &Err : ScanErrors)
+        if (Err)
+          ScanError = joinErrors(std::move(ScanError), std::move(*Err));
+      if (ScanError)
+        return ScanError;
+
+      llvm::TimeTraceScope PublishTimeScope(
+          "LTO publish module summary preparations");
+      for (size_t I = BatchBegin; I != BatchEnd; ++I)
+        PendingModuleSummaries[I].Reader->publish();
+    }
+  }
+
   if (PendingModuleSummaries.size() == 1) {
     if (Error Err = PendingModuleSummaries.front().Reader->read())
       return Err;

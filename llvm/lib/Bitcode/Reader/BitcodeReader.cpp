@@ -990,8 +990,29 @@ class ModuleSummaryIndexBitcodeReader : public BitcodeReaderBase {
 
   uint64_t SummaryVersion = 0;
   bool SummaryPrepared = false;
+  bool PreparationPublished = false;
   bool SummaryAtEnd = false;
   bool DeferMerge = false;
+
+  struct PendingValueInfo {
+    uint64_t ValueID;
+    GlobalValue::GUID GUID;
+    GlobalValue::GUID OriginalNameID;
+    StringRef Name;
+    bool HasName;
+  };
+  std::vector<PendingValueInfo> PendingValueInfos;
+  std::deque<std::string> PendingOwnedValueNames;
+
+  struct PendingModuleInfo {
+    uint64_t ModuleID;
+    std::string Path;
+    std::optional<ModuleHash> Hash;
+  };
+  std::vector<PendingModuleInfo> PendingModuleInfos;
+  bool PendingThisModule = false;
+  std::optional<ModuleHash> PendingThisModuleHash;
+  std::optional<uint64_t> PendingSummaryFlags;
 
   struct PendingSummary {
     ValueInfo VI;
@@ -1018,6 +1039,7 @@ public:
 
   Error parseModule();
   Error prepareModule();
+  void publishModulePreparation();
   Error parsePreparedSummary();
   void mergePreparedSummary();
 
@@ -7223,6 +7245,10 @@ ModuleSummaryIndexBitcodeReader::ModuleSummaryIndexBitcodeReader(
       ModulePath(ModulePath), IsPrevailing(IsPrevailing) {}
 
 void ModuleSummaryIndexBitcodeReader::addThisModule() {
+  if (DeferMerge) {
+    PendingThisModule = true;
+    return;
+  }
   TheIndex.addModule(ModulePath);
 }
 
@@ -7254,6 +7280,15 @@ void ModuleSummaryIndexBitcodeReader::setValueGUID(
   auto OriginalNameID = ValueGUID;
   if (GlobalValue::isLocalLinkage(Linkage))
     OriginalNameID = GlobalValue::getGUIDAssumingExternalLinkage(ValueName);
+  if (DeferMerge) {
+    if (!UseStrtab) {
+      PendingOwnedValueNames.emplace_back(ValueName);
+      ValueName = PendingOwnedValueNames.back();
+    }
+    PendingValueInfos.push_back(
+        {ValueID, ValueGUID, OriginalNameID, ValueName, /*HasName=*/true});
+    return;
+  }
   if (PrintSummaryGUIDs)
     dbgs() << "GUID " << ValueGUID << "(" << OriginalNameID << ") is "
            << ValueName << "\n";
@@ -7352,8 +7387,12 @@ Error ModuleSummaryIndexBitcodeReader::parseValueSymbolTable(
       GlobalValue::GUID RefGUID = Record[1];
       // The "original name", which is the second value of the pair will be
       // overriden later by a FS_COMBINED_ORIGINAL_NAME in the combined index.
-      ValueIdToValueInfoMap[ValueID] =
-          std::make_pair(TheIndex.getOrInsertValueInfo(RefGUID), RefGUID);
+      if (DeferMerge)
+        PendingValueInfos.push_back(
+            {ValueID, RefGUID, RefGUID, /*Name=*/{}, /*HasName=*/false});
+      else
+        ValueIdToValueInfoMap[ValueID] =
+            std::make_pair(TheIndex.getOrInsertValueInfo(RefGUID), RefGUID);
       break;
     }
     }
@@ -7368,12 +7407,61 @@ Error ModuleSummaryIndexBitcodeReader::parseModule() {
 }
 
 Error ModuleSummaryIndexBitcodeReader::prepareModule() {
+  assert(!DeferMerge && "module summary scanned more than once");
   DeferMerge = true;
   if (Error Err = parseModuleImpl(/*PrepareOnly=*/true))
     return Err;
   if (!SummaryPrepared)
     return error("Expected module summary block");
   return Error::success();
+}
+
+void ModuleSummaryIndexBitcodeReader::publishModulePreparation() {
+  assert(DeferMerge && SummaryPrepared && "module must be scanned first");
+  assert(!PreparationPublished && "module preparation already published");
+
+  if (PendingSummaryFlags)
+    TheIndex.setFlags(*PendingSummaryFlags);
+
+  assert((PendingThisModule || !PendingThisModuleHash) &&
+         "module hash without a registered module");
+  if (PendingThisModule) {
+    ModuleSummaryIndex::ModuleInfo *Module = TheIndex.addModule(ModulePath);
+    if (PendingThisModuleHash)
+      Module->second = *PendingThisModuleHash;
+  }
+
+  for (PendingModuleInfo &Pending : PendingModuleInfos) {
+    ModuleSummaryIndex::ModuleInfo *Module = TheIndex.addModule(Pending.Path);
+    if (Pending.Hash)
+      Module->second = *Pending.Hash;
+    ModuleIdMap[Pending.ModuleID] = Module->first();
+  }
+
+  for (PendingValueInfo &Pending : PendingValueInfos) {
+    ValueInfo VI;
+    if (!Pending.HasName) {
+      VI = TheIndex.getOrInsertValueInfo(Pending.GUID);
+    } else {
+      StringRef Name =
+          UseStrtab ? Pending.Name : TheIndex.saveString(Pending.Name);
+      VI = TheIndex.getOrInsertValueInfo(Pending.GUID, Name);
+      if (PrintSummaryGUIDs)
+        dbgs() << "GUID " << Pending.GUID << "(" << Pending.OriginalNameID
+               << ") is " << Name << "\n";
+    }
+    ValueIdToValueInfoMap[Pending.ValueID] =
+        std::make_pair(VI, Pending.OriginalNameID);
+  }
+
+  StackIdIndices.reserve(StackIds.size());
+  for (uint64_t StackId : StackIds)
+    StackIdIndices.push_back(TheIndex.addOrGetStackIdIndex(StackId));
+
+  PendingModuleInfos.clear();
+  PendingValueInfos.clear();
+  PendingOwnedValueNames.clear();
+  PreparationPublished = true;
 }
 
 Error ModuleSummaryIndexBitcodeReader::parseModuleImpl(bool PrepareOnly) {
@@ -7486,11 +7574,17 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleImpl(bool PrepareOnly) {
         case bitc::MODULE_CODE_HASH: {
           if (Record.size() != 5)
             return error("Invalid hash length " + Twine(Record.size()).str());
-          auto &Hash = getThisModule()->second;
+          ModuleHash *Hash;
+          if (DeferMerge) {
+            PendingThisModuleHash.emplace();
+            Hash = &*PendingThisModuleHash;
+          } else {
+            Hash = &getThisModule()->second;
+          }
           int Pos = 0;
           for (auto &Val : Record) {
             assert(!(Val >> 32) && "Unexpected high bits set");
-            Hash[Pos++] = Val;
+            (*Hash)[Pos++] = Val;
           }
           break;
         }
@@ -7739,8 +7833,8 @@ Error ModuleSummaryIndexBitcodeReader::parseEntireSummary(unsigned ID) {
   return parsePreparedSummary();
 }
 
-// Parse the summary prefix serially. This interns all ValueInfos and stack ids
-// before any readers operate concurrently on the combined index.
+// Scan the summary prefix. In deferred mode this only records reader-local
+// ValueInfos and stack ids; publishModulePreparation() interns them later.
 Error ModuleSummaryIndexBitcodeReader::prepareEntireSummary(unsigned ID) {
   if (Error Err = Stream.EnterSubBlock(ID))
     return Err;
@@ -7785,14 +7879,21 @@ Error ModuleSummaryIndexBitcodeReader::prepareEntireSummary(unsigned ID) {
       return MaybeBitCode.takeError();
     switch (MaybeBitCode.get()) {
     case bitc::FS_FLAGS:
-      TheIndex.setFlags(Record[0]);
+      if (DeferMerge)
+        PendingSummaryFlags = PendingSummaryFlags.value_or(0) | Record[0];
+      else
+        TheIndex.setFlags(Record[0]);
       break;
     case bitc::FS_VALUE_GUID: {
       uint64_t ValueID = Record[0];
       GlobalValue::GUID RefGUID =
           SummaryVersion >= 11 ? Record[1] << 32 | Record[2] : Record[1];
-      ValueIdToValueInfoMap[ValueID] =
-          std::make_pair(TheIndex.getOrInsertValueInfo(RefGUID), RefGUID);
+      if (DeferMerge)
+        PendingValueInfos.push_back(
+            {ValueID, RefGUID, RefGUID, /*Name=*/{}, /*HasName=*/false});
+      else
+        ValueIdToValueInfoMap[ValueID] =
+            std::make_pair(TheIndex.getOrInsertValueInfo(RefGUID), RefGUID);
       break;
     }
     case bitc::FS_STACK_IDS:
@@ -7803,11 +7904,6 @@ Error ModuleSummaryIndexBitcodeReader::prepareEntireSummary(unsigned ID) {
         StackIds.reserve(Record.size() / 2);
         for (auto R = Record.begin(); R != Record.end(); R += 2)
           StackIds.push_back(*R << 32 | *(R + 1));
-      }
-      if (DeferMerge) {
-        StackIdIndices.reserve(StackIds.size());
-        for (uint64_t StackId : StackIds)
-          StackIdIndices.push_back(TheIndex.addOrGetStackIdIndex(StackId));
       }
       break;
     default:
@@ -7821,6 +7917,8 @@ Error ModuleSummaryIndexBitcodeReader::prepareEntireSummary(unsigned ID) {
 
 Error ModuleSummaryIndexBitcodeReader::parsePreparedSummary() {
   assert(SummaryPrepared && "summary must be prepared before parsing");
+  assert((!DeferMerge || PreparationPublished) &&
+         "summary preparation must be published before parsing");
   if (SummaryAtEnd)
     return Error::success();
   return parseSummaryBody();
@@ -8482,6 +8580,7 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
 
   SmallString<128> ModulePath;
   ModuleSummaryIndex::ModuleInfo *LastSeenModule = nullptr;
+  std::optional<size_t> LastSeenPendingModule;
 
   while (true) {
     Expected<BitstreamEntry> MaybeEntry = Stream.advanceSkippingSubblocks();
@@ -8514,8 +8613,14 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
       if (convertToString(Record, 1, ModulePath))
         return error("Invalid record");
 
-      LastSeenModule = TheIndex.addModule(ModulePath);
-      ModuleIdMap[ModuleId] = LastSeenModule->first();
+      if (DeferMerge) {
+        PendingModuleInfos.push_back(
+            {ModuleId, std::string(ModulePath), std::nullopt});
+        LastSeenPendingModule = PendingModuleInfos.size() - 1;
+      } else {
+        LastSeenModule = TheIndex.addModule(ModulePath);
+        ModuleIdMap[ModuleId] = LastSeenModule->first();
+      }
 
       ModulePath.clear();
       break;
@@ -8524,15 +8629,24 @@ Error ModuleSummaryIndexBitcodeReader::parseModuleStringTable() {
     case bitc::MST_CODE_HASH: {
       if (Record.size() != 5)
         return error("Invalid hash length " + Twine(Record.size()).str());
-      if (!LastSeenModule)
+      if (DeferMerge ? !LastSeenPendingModule : !LastSeenModule)
         return error("Invalid hash that does not follow a module path");
+      ModuleHash *Hash;
+      if (DeferMerge) {
+        PendingModuleInfo &Pending = PendingModuleInfos[*LastSeenPendingModule];
+        Pending.Hash.emplace();
+        Hash = &*Pending.Hash;
+      } else {
+        Hash = &LastSeenModule->second;
+      }
       int Pos = 0;
       for (auto &Val : Record) {
         assert(!(Val >> 32) && "Unexpected high bits set");
-        LastSeenModule->second[Pos++] = Val;
+        (*Hash)[Pos++] = Val;
       }
       // Reset LastSeenModule to avoid overriding the hash unexpectedly.
       LastSeenModule = nullptr;
+      LastSeenPendingModule.reset();
       break;
     }
     }
@@ -8808,6 +8922,12 @@ ModuleSummaryIndexReader::ModuleSummaryIndexReader(std::unique_ptr<Impl> P)
 
 ModuleSummaryIndexReader::~ModuleSummaryIndexReader() = default;
 
+Error ModuleSummaryIndexReader::scan() { return P->Reader->prepareModule(); }
+
+void ModuleSummaryIndexReader::publish() {
+  P->Reader->publishModulePreparation();
+}
+
 Error ModuleSummaryIndexReader::read() {
   return P->Reader->parsePreparedSummary();
 }
@@ -8815,7 +8935,7 @@ Error ModuleSummaryIndexReader::read() {
 void ModuleSummaryIndexReader::merge() { P->Reader->mergePreparedSummary(); }
 
 Expected<std::unique_ptr<ModuleSummaryIndexReader>>
-BitcodeModule::prepareSummary(
+BitcodeModule::createSummaryReader(
     ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
     std::function<bool(GlobalValue::GUID)> IsPrevailing) {
   BitstreamCursor Stream(Buffer);
@@ -8825,13 +8945,25 @@ BitcodeModule::prepareSummary(
   auto R = std::make_unique<ModuleSummaryIndexBitcodeReader>(
       std::move(Stream), Strtab, CombinedIndex, ModulePath,
       std::move(IsPrevailing));
-  if (Error Err = R->prepareModule())
-    return std::move(Err);
 
   auto P = std::make_unique<ModuleSummaryIndexReader::Impl>();
   P->Reader = std::move(R);
   return std::unique_ptr<ModuleSummaryIndexReader>(
       new ModuleSummaryIndexReader(std::move(P)));
+}
+
+Expected<std::unique_ptr<ModuleSummaryIndexReader>>
+BitcodeModule::prepareSummary(
+    ModuleSummaryIndex &CombinedIndex, StringRef ModulePath,
+    std::function<bool(GlobalValue::GUID)> IsPrevailing) {
+  Expected<std::unique_ptr<ModuleSummaryIndexReader>> Reader =
+      createSummaryReader(CombinedIndex, ModulePath, std::move(IsPrevailing));
+  if (!Reader)
+    return Reader.takeError();
+  if (Error Err = (*Reader)->scan())
+    return std::move(Err);
+  (*Reader)->publish();
+  return std::move(*Reader);
 }
 
 // Parse the specified bitcode buffer, returning the function info index.

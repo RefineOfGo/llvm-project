@@ -1019,7 +1019,8 @@ class ModuleSummaryIndexBitcodeReader : public BitcodeReaderBase {
     std::unique_ptr<GlobalValueSummary> Summary;
   };
   std::vector<PendingSummary> PendingSummaries;
-  DenseMap<GlobalValue::GUID, GlobalValueSummary *> PendingSummaryMap;
+  DenseMap<std::pair<GlobalValue::GUID, StringRef>, GlobalValueSummary *>
+      PendingSummaryMap;
 
   struct PendingTypeIdCompatibleVtable {
     StringRef TypeId;
@@ -8513,7 +8514,8 @@ void ModuleSummaryIndexBitcodeReader::addSummary(
     TheIndex.addGlobalValueSummary(VI, std::move(Summary));
     return;
   }
-  PendingSummaryMap.try_emplace(VI.getGUID(), Summary.get());
+  PendingSummaryMap.try_emplace(
+      std::make_pair(VI.getGUID(), Summary->modulePath()), Summary.get());
   PendingSummaries.push_back({VI, std::move(Summary)});
 }
 
@@ -8521,8 +8523,8 @@ GlobalValueSummary *
 ModuleSummaryIndexBitcodeReader::findSummaryInModule(ValueInfo VI,
                                                      StringRef Module) {
   if (DeferMerge) {
-    auto It = PendingSummaryMap.find(VI.getGUID());
-    if (It != PendingSummaryMap.end() && It->second->modulePath() == Module)
+    auto It = PendingSummaryMap.find(std::make_pair(VI.getGUID(), Module));
+    if (It != PendingSummaryMap.end())
       return It->second;
   }
   return TheIndex.findSummaryInModule(VI, Module);

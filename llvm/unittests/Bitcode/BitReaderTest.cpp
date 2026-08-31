@@ -303,6 +303,60 @@ TEST(BitReaderTest, StagedSummaryPreparation) {
   EXPECT_EQ(VI.getSummaryList().size(), 1u);
 }
 
+TEST(BitReaderTest, StagedCombinedIndexAliasUsesAliaseeFromSameModule) {
+  ModuleSummaryIndex InputIndex(/*HaveGVs=*/false);
+  StringRef Module1 = InputIndex.addModule("module1.bc")->first();
+  StringRef Module2 = InputIndex.addModule("module2.bc")->first();
+
+  GlobalValue::GUID AliaseeGUID =
+      GlobalValue::getGUIDAssumingExternalLinkage("aliasee");
+  ValueInfo AliaseeVI = InputIndex.getOrInsertValueInfo(AliaseeGUID, "aliasee");
+
+  SmallVector<FunctionSummary::EdgeTy, 0> Edges1;
+  auto Aliasee1 = std::make_unique<FunctionSummary>(
+      FunctionSummary::makeDummyFunctionSummary(std::move(Edges1)));
+  Aliasee1->setModulePath(Module1);
+  InputIndex.addGlobalValueSummary(AliaseeVI, std::move(Aliasee1));
+
+  SmallVector<FunctionSummary::EdgeTy, 0> Edges2;
+  auto Aliasee2 = std::make_unique<FunctionSummary>(
+      FunctionSummary::makeDummyFunctionSummary(std::move(Edges2)));
+  Aliasee2->setModulePath(Module2);
+  GlobalValueSummary *Aliasee2Ptr = Aliasee2.get();
+  InputIndex.addGlobalValueSummary(AliaseeVI, std::move(Aliasee2));
+
+  GlobalValueSummary::GVFlags AliasFlags(
+      GlobalValue::ExternalLinkage, GlobalValue::DefaultVisibility,
+      /*NotEligibleToImport=*/false, /*Live=*/false, /*IsLocal=*/false,
+      /*CanAutoHide=*/false, GlobalValueSummary::ImportKind::Definition);
+  auto Alias = std::make_unique<AliasSummary>(AliasFlags);
+  Alias->setModulePath(Module2);
+  Alias->setAliasee(AliaseeVI, Aliasee2Ptr);
+  GlobalValue::GUID AliasGUID =
+      GlobalValue::getGUIDAssumingExternalLinkage("alias");
+  InputIndex.addGlobalValueSummary(
+      InputIndex.getOrInsertValueInfo(AliasGUID, "alias"), std::move(Alias));
+
+  SmallString<1024> Mem;
+  raw_svector_ostream OS(Mem);
+  writeIndexToFile(InputIndex, OS);
+  BitcodeFileContents Contents =
+      cantFail(getBitcodeFileContents(MemoryBufferRef(Mem.str(), "index.bc")));
+  ASSERT_EQ(Contents.Mods.size(), 1u);
+
+  ModuleSummaryIndex OutputIndex(/*HaveGVs=*/false);
+  std::unique_ptr<ModuleSummaryIndexReader> Reader =
+      cantFail(Contents.Mods.front().createSummaryReader(OutputIndex, ""));
+  cantFail(Reader->scan());
+  Reader->publish();
+  cantFail(Reader->read());
+  Reader->merge();
+
+  auto *ParsedAlias = cast<AliasSummary>(
+      OutputIndex.findSummaryInModule(AliasGUID, "module2.bc"));
+  EXPECT_EQ(ParsedAlias->getAliasee().modulePath(), "module2.bc");
+}
+
 // Helper function to convert type metadata to a string for testing
 static std::string mdToString(Metadata *MD) {
   std::string S;

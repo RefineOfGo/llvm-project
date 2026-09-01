@@ -690,9 +690,9 @@ void ThinLTOCodeGenerator::promote(Module &TheModule, ModuleSummaryIndex &Index,
   // Generate import/export list
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
 
   // Resolve prevailing symbols
   StringMap<std::map<GlobalValue::GUID, GlobalValue::LinkageTypes>> ResolvedODR;
@@ -742,9 +742,9 @@ void ThinLTOCodeGenerator::crossModuleImport(Module &TheModule,
   // Generate import/export list
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
   auto &ImportList = ImportLists[TheModule.getModuleIdentifier()];
 
   // FIXME Set ClearDSOLocalOnDeclarations.
@@ -782,9 +782,9 @@ void ThinLTOCodeGenerator::gatherImportedSummariesForModule(
   // Generate import/export list
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
 
   llvm::gatherImportedSummariesForModule(
       ModuleIdentifier, ModuleToDefinedGVSummaries,
@@ -820,9 +820,9 @@ void ThinLTOCodeGenerator::emitImports(Module &TheModule, StringRef OutputName,
   // Generate import/export list
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
 
   // 'EmitImportsFiles' emits the list of modules from which to import from, and
   // the set of keys in `ModuleToSummariesForIndex` should be a superset of keys
@@ -870,9 +870,9 @@ void ThinLTOCodeGenerator::internalize(Module &TheModule,
   // Generate import/export list
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
   auto &ExportList = ExportLists[ModuleIdentifier];
 
   // Be friendly and don't nuke totally the module when the client didn't
@@ -1066,9 +1066,9 @@ void ThinLTOCodeGenerator::run() {
   // combined index.
   FunctionImporter::ImportListsTy ImportLists(ModuleCount);
   DenseMap<StringRef, FunctionImporter::ExportSetTy> ExportLists(ModuleCount);
-  ComputeCrossModuleImport(*Index, ModuleToDefinedGVSummaries,
-                           IsPrevailing(PrevailingCopy), ImportLists,
-                           ExportLists);
+  ComputeCrossModuleImport(
+      *Index, ModuleToDefinedGVSummaries, IsPrevailing(PrevailingCopy),
+      ImportLists, ExportLists, heavyweight_hardware_concurrency(ThreadCount));
 
   // We use a std::map here to be able to have a defined ordering when
   // producing a hash for the cache entry.

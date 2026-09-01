@@ -2131,7 +2131,8 @@ Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
 
   if (Conf.OptLevel > 0)
     ComputeCrossModuleImport(ThinLTO.CombinedIndex, ModuleToDefinedGVSummaries,
-                             isPrevailing, ImportLists, ExportLists);
+                             isPrevailing, ImportLists, ExportLists,
+                             ThinLTO.Backend.getParallelism());
 
   // Any functions referenced by the jump table in the regular LTO object must
   // be exported.

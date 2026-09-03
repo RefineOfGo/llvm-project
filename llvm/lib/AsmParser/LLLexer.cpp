@@ -692,6 +692,8 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(cheriot_librarycallcc);
   KEYWORD(rogcc);
   KEYWORD(rog_coldcc);
+  KEYWORD(go_abi0cc);
+  KEYWORD(go_abiinternalcc);
 
   KEYWORD(cc);
   KEYWORD(c);

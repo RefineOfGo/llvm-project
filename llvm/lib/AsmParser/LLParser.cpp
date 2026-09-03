@@ -2228,6 +2228,8 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'riscv_vls_cc'
 ///   ::= 'rogcc'
 ///   ::= 'rog_coldcc'
+///   ::= 'go_abi0cc'
+///   ::= 'go_abiinternalcc'
 ///   ::= 'cc' UINT
 ///
 bool LLParser::parseOptionalCallingConv(unsigned &CC) {
@@ -2353,6 +2355,8 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
     }
   case lltok::kw_rogcc:          CC = CallingConv::ROG; break;
   case lltok::kw_rog_coldcc:     CC = CallingConv::ROG_Cold; break;
+  case lltok::kw_go_abi0cc:      CC = CallingConv::GoABI0; break;
+  case lltok::kw_go_abiinternalcc: CC = CallingConv::GoABIInternal; break;
   }
 
   Lex.Lex();

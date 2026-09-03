@@ -424,6 +424,76 @@ TEST_F(JobserverStrategyTest, ThreadPoolConcurrencyIsLimited) {
   EXPECT_EQ(CompletedTasks, NumTasks);
 }
 
+// Parent-side driver for the nested task-group child test. The child is
+// expected to deadlock on regressions, so keep the hang contained and bounded.
+TEST_F(JobserverStrategyTest, NestedTaskGroupCompletion_Subprocess) {
+  ScopedEnvironment ChildEnv("LLVM_JOBSERVER_NESTED_GROUP_CHILD", "1");
+
+  std::string Executable =
+      sys::fs::getMainExecutable(TestMainArgv0, &JobserverTestAnchor);
+  ASSERT_FALSE(Executable.empty()) << "Failed to get main executable path";
+  SmallVector<StringRef, 4> Args{Executable,
+                                 "--gtest_filter=JobserverStrategyTest."
+                                 "NestedTaskGroupCompletion_SubprocessChild"};
+
+  std::string Error;
+  bool ExecFailed = false;
+  int RC = sys::ExecuteAndWait(Executable, Args, std::nullopt, {}, 10, 0,
+                               &Error, &ExecFailed);
+  ASSERT_FALSE(ExecFailed) << Error;
+  ASSERT_EQ(RC, 0) << "Executable failed or timed out with code " << RC;
+}
+
+// A jobserver worker waiting for a nested group recursively processes pending
+// work and sleeps on the pool's queue condition. Verify that it wakes when a
+// different jobserver worker completes the final task in the nested group.
+TEST_F(JobserverStrategyTest, NestedTaskGroupCompletion_SubprocessChild) {
+  if (!getenv("LLVM_JOBSERVER_NESTED_GROUP_CHILD"))
+    GTEST_SKIP() << "Not running in child mode";
+
+  // Two explicit slots ensure that the pool observes at least two jobs even if
+  // the make proxy temporarily holds one while recycling it.
+  startMakeProxy(/*NumInitialJobs=*/2);
+  StdThreadPool Pool(jobserver_concurrency());
+  ASSERT_GE(Pool.getMaxConcurrency(), 2u);
+
+  std::promise<void> StartTasks;
+  std::shared_future<void> Start = StartTasks.get_future().share();
+  std::promise<void> FirstTaskFinished;
+  std::future<void> FirstTaskFinishedFuture = FirstTaskFinished.get_future();
+  std::promise<void> InnerTaskStarted;
+  std::future<void> InnerTaskStartedFuture = InnerTaskStarted.get_future();
+  std::atomic<bool> RanOnDifferentWorker{false};
+
+  ThreadPoolTaskGroup OuterGroup(Pool);
+  OuterGroup.async([&] {
+    Start.wait();
+    FirstTaskFinished.set_value();
+  });
+  OuterGroup.async([&] {
+    Start.wait();
+    FirstTaskFinishedFuture.wait();
+
+    const llvm::thread::id OuterThread = llvm::this_thread::get_id();
+    ThreadPoolTaskGroup InnerGroup(Pool);
+    InnerGroup.async([&] {
+      RanOnDifferentWorker = llvm::this_thread::get_id() != OuterThread;
+      InnerTaskStarted.set_value();
+      // Give the outer worker time to enter its recursive group wait.
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    });
+
+    // Do not recursively process the inner task on this worker. Waiting here
+    // forces the worker released by the first outer task to pick it up.
+    InnerTaskStartedFuture.wait();
+    InnerGroup.wait();
+  });
+
+  StartTasks.set_value();
+  OuterGroup.wait();
+  EXPECT_TRUE(RanOnDifferentWorker);
+}
+
 // Parent-side driver that spawns a fresh process to run the child test which
 // validates that parallelFor respects the jobserver limit when it is the first
 // user of the default executor in that process.

@@ -3,12 +3,15 @@
 ; RUN: llc < %s -mtriple=x86_64-apple-macosx -enable-implicit-null-checks \
 ; RUN:    | llvm-mc -triple x86_64-apple-macosx -filetype=obj -o - \
 ; RUN:    | llvm-objdump --triple=x86_64-apple-macosx --fault-map-section - \
-; RUN:    | FileCheck %s -check-prefix OBJDUMP
+; RUN:    | FileCheck %s -check-prefix MACHO-OBJDUMP
 
-; RUN: llc < %s -mtriple=x86_64-unknown-linux-gnu -enable-implicit-null-checks \
-; RUN:    | llvm-mc -triple x86_64-unknown-linux-gnu -filetype=obj -o - \
-; RUN:    | llvm-objdump --triple=x86_64-unknown-linux-gnu --fault-map-section - \
-; RUN:    | FileCheck %s -check-prefix OBJDUMP
+; RUN: llc < %s -mtriple=x86_64-unknown-linux-gnu -function-sections \
+; RUN:    -enable-implicit-null-checks | FileCheck %s -check-prefix ELF
+
+; RUN: llc < %s -mtriple=x86_64-unknown-linux-gnu -function-sections \
+; RUN:    -enable-implicit-null-checks -filetype=obj -o %t
+; RUN: llvm-readobj --elf-output-style=GNU --sections %t \
+; RUN:    | FileCheck %s -check-prefix ELF-SECTIONS
 
 ;; The tests in this file exist just to check basic validity of the FaultMap
 ;; section.  Please don't add to this file unless you're testing the FaultMap
@@ -95,10 +98,39 @@ define void @imp_null_check_store(ptr %x) {
 ; Fault[0].HandlerOffset:
 ; CHECK-NEXT: .long [[BB1_imp_null_check_store]]-_imp_null_check_store
 
-; OBJDUMP: FaultMap table:
-; OBJDUMP-NEXT: Version: 0x1
-; OBJDUMP-NEXT: NumFunctions: 2
-; OBJDUMP-NEXT: FunctionAddress: 0x000000, NumFaultingPCs: 1
-; OBJDUMP-NEXT: Fault kind: FaultingLoad, faulting PC offset: 0, handling PC offset: 3
-; OBJDUMP-NEXT: FunctionAddress: 0x000000, NumFaultingPCs: 1
-; OBJDUMP-NEXT: Fault kind: FaultingStore, faulting PC offset: 0, handling PC offset: 7
+; MACHO-OBJDUMP: FaultMap table:
+; MACHO-OBJDUMP-NEXT: Version: 0x1
+; MACHO-OBJDUMP-NEXT: NumFunctions: 2
+; MACHO-OBJDUMP-NEXT: FunctionAddress: 0x000000, NumFaultingPCs: 1
+; MACHO-OBJDUMP-NEXT: Fault kind: FaultingLoad, faulting PC offset: 0, handling PC offset: 3
+; MACHO-OBJDUMP-NEXT: FunctionAddress: 0x000000, NumFaultingPCs: 1
+; MACHO-OBJDUMP-NEXT: Fault kind: FaultingStore, faulting PC offset: 0, handling PC offset: 7
+
+; ELF: .section .llvm_faultmaps,"ao",@progbits,imp_null_check_load
+; ELF-NEXT: .byte 1
+; ELF-NEXT: .byte 0
+; ELF-NEXT: .short 0
+; ELF-NEXT: .long 1
+; ELF-NEXT: .quad imp_null_check_load
+; ELF-NEXT: .long 1
+; ELF-NEXT: .long 0
+; ELF-NEXT: .long 1
+; ELF-NEXT: .long {{[^-]+}}-imp_null_check_load
+; ELF-NEXT: .long {{[^-]+}}-imp_null_check_load
+
+; ELF: .section .llvm_faultmaps,"ao",@progbits,imp_null_check_store
+; ELF-NEXT: .byte 1
+; ELF-NEXT: .byte 0
+; ELF-NEXT: .short 0
+; ELF-NEXT: .long 1
+; ELF-NEXT: .quad imp_null_check_store
+; ELF-NEXT: .long 1
+; ELF-NEXT: .long 0
+; ELF-NEXT: .long 3
+; ELF-NEXT: .long {{[^-]+}}-imp_null_check_store
+; ELF-NEXT: .long {{[^-]+}}-imp_null_check_store
+
+; ELF-SECTIONS: {{\[ *}}[[LOAD_TEXT:[0-9]+]]{{\]}} .text.imp_null_check_load {{.*}} AX
+; ELF-SECTIONS: {{\[ *}}[[STORE_TEXT:[0-9]+]]{{\]}} .text.imp_null_check_store {{.*}} AX
+; ELF-SECTIONS: {{\[ *[0-9]+\]}} .llvm_faultmaps {{.*}} AL [[LOAD_TEXT]]
+; ELF-SECTIONS: {{\[ *[0-9]+\]}} .llvm_faultmaps {{.*}} AL [[STORE_TEXT]]

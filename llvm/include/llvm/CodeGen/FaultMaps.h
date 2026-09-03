@@ -69,6 +69,7 @@ private:
       FunctionInfos;
   AsmPrinter &AP;
 
+  void serializeToFaultMapSectionPerFunction();
   void emitFunctionInfo(const MCSymbol *FnLabel, const FunctionFaultInfos &FFI);
 };
 

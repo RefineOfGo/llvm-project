@@ -1230,6 +1230,17 @@ def CSR_64 : CalleeSavedRegs<(add RBX, R12, R13, R14, R15, RBP)>;
 def CSR_64_SwiftError : CalleeSavedRegs<(sub CSR_64, R12)>;
 def CSR_64_SwiftTail : CalleeSavedRegs<(sub CSR_64, R13, R14)>;
 
+// The ROG calling convention passes the closure context (swiftself) in R13
+// and, like Go's context register, does not preserve it across calls: a
+// callee-saved context register would be spilled into the callee-saved area
+// of whichever deeper frame first needs R13, and the garbage collector scans
+// those areas conservatively, so an environment that the callee has already
+// consumed would stay reachable for as long as that frame lives (a blocked
+// goroutine, for instance). Keeping R13 volatile makes a closure body that
+// still needs its environment after a call spill it into its own precisely
+// mapped frame instead.
+def CSR_64_ROG : CalleeSavedRegs<(sub CSR_64, R13)>;
+
 def CSR_32EHRet : CalleeSavedRegs<(add EAX, EDX, CSR_32)>;
 def CSR_64EHRet : CalleeSavedRegs<(add RAX, RDX, CSR_64)>;
 

@@ -17,10 +17,12 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
+#include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -50,6 +52,7 @@ static cl::opt<int> StackMapVersion(
     cl::desc("Specify the stackmap encoding version (default = 3)"));
 
 const char *StackMaps::WSMP = "Stack Maps: ";
+static constexpr char ROGStackObjMetadata[] = "rog.stackobj";
 
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
@@ -541,6 +544,9 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
   // MachineFrameInfo, so it is independent of where shrink-wrapping places the
   // actual save instructions.
   const TargetFrameLowering *TFI = AP.MF->getSubtarget().getFrameLowering();
+  const TargetLowering *TLI = AP.MF->getSubtarget().getTargetLowering();
+  Register SPReg =
+      TLI ? TLI->getStackPointerRegisterToSaveRestore() : Register();
   Register FPReg = RegInfo->getFrameRegister(*AP.MF);
   int32_t Lo = 0, Hi = 0;
   bool Any = false;
@@ -568,6 +574,55 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
   }
   CurrentIt->second.CSRLo = Lo;
   CurrentIt->second.CSRHi = Hi;
+
+  SmallVector<FunctionInfo::StackObjectInfo, 16> StackObjects;
+  for (int FI = MFI.getObjectIndexBegin(), FE = MFI.getObjectIndexEnd();
+       FI != FE; ++FI) {
+    if (MFI.isDeadObjectIndex(FI))
+      continue;
+    const AllocaInst *AI = MFI.getObjectAllocation(FI);
+    if (!AI || !AI->getMetadata(ROGStackObjMetadata))
+      continue;
+    if (MFI.isVariableSizedObjectIndex(FI))
+      report_fatal_error("ROG stack object cannot be variable-sized");
+    int64_t Size = MFI.getObjectSize(FI);
+    if (Size <= 0 || Size > UINT32_MAX)
+      report_fatal_error("ROG stack object size is not representable");
+
+    Register FrameReg;
+    StackOffset Off = TFI->getFrameIndexReference(*AP.MF, FI, FrameReg);
+    using ROGStackObjectKind =
+        FunctionInfo::StackObjectInfo::ROGStackObjectKind;
+    ROGStackObjectKind Kind;
+    if (SPReg && RegInfo->isSuperOrSubRegisterEq(FrameReg, SPReg))
+      Kind = FunctionInfo::StackObjectInfo::ROGStackObjectRsp;
+    else if (FPReg && RegInfo->isSuperOrSubRegisterEq(FrameReg, FPReg))
+      Kind = FunctionInfo::StackObjectInfo::ROGStackObjectRbp;
+    else
+      report_fatal_error(
+          "ROG stack object is not stack-pointer or frame-pointer relative");
+    if (Off.getScalable() != 0 || !isInt<32>(Off.getFixed()))
+      report_fatal_error("ROG stack object offset is not representable");
+    StackObjects.push_back(
+        {Kind, static_cast<int32_t>(Off.getFixed()), static_cast<uint32_t>(Size)});
+  }
+  llvm::sort(StackObjects, [](const FunctionInfo::StackObjectInfo &A,
+                              const FunctionInfo::StackObjectInfo &B) {
+    if (A.Kind != B.Kind)
+      return A.Kind < B.Kind;
+    if (A.Offset != B.Offset)
+      return A.Offset < B.Offset;
+    return A.Size < B.Size;
+  });
+  StackObjects.erase(std::unique(StackObjects.begin(), StackObjects.end(),
+                                 [](const FunctionInfo::StackObjectInfo &A,
+                                    const FunctionInfo::StackObjectInfo &B) {
+                                   return A.Kind == B.Kind &&
+                                          A.Offset == B.Offset &&
+                                          A.Size == B.Size;
+                                 }),
+                     StackObjects.end());
+  CurrentIt->second.StackObjects = std::move(StackObjects);
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
@@ -876,6 +931,7 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 
     if (!EmitV3) {
       emitCompactFunctionBlob(OS, FnSym, FnInfo, CSIdx);
+      emitStackObjectBlob(OS, FnSym, FnInfo, CSIdx);
       CSIdx += FnInfo.RecordCount;
       OS.addBlankLine();
       continue;
@@ -906,6 +962,7 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 
     for (uint64_t I = 0; I < FnInfo.RecordCount; ++I, ++CSIdx)
       emitCallsiteEntry(OS, CSInfos[CSIdx]);
+    emitStackObjectBlob(OS, FnSym, FnInfo, CSIdx - FnInfo.RecordCount);
 
     OS.addBlankLine();
   }
@@ -982,11 +1039,15 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
     for (const Location &Loc : CSI.Locations) {
       switch (Loc.Type) {
       case Location::Register:
-      case Location::Direct:
       case Location::Indirect:
         RecSlots.push_back(
             {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*SizeFlags=*/0});
-        AwaitingSize = Loc.Type == Location::Direct;
+        AwaitingSize = false;
+        break;
+      case Location::Direct:
+        RecSlots.push_back(
+            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*SizeFlags=*/0});
+        AwaitingSize = true;
         break;
       case Location::Constant:
         if (AwaitingSize) {
@@ -1086,4 +1147,68 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
     OS.emitValue(R.Offset, 4);
     OS.emitIntValue(R.SetAndFlags, 4);
   }
+}
+
+/// ROG precise GC: side table for function-level stack objects.
+///
+/// The normal stackmap remains the authoritative per-callsite precise-root map.
+/// This section emits stack-object metadata collected from the function's
+/// MachineFrameInfo frame objects into one compact, per-function blob so the
+/// runtime can build:
+///   - return PC -> stack-object-set index
+///   - stack-object-set index -> sorted stack-object intervals
+///
+/// Layout (little-endian, pointer-sized PCs):
+///   u32 NumPCs
+///   uintptr PC[NumPCs]
+///   u32 NumStackObjects
+///   StackObject[NumStackObjects] { u32 kind, i32 offset, u32 size }
+///
+/// `kind` is 1 for stack-pointer-relative offsets and 2 for frame-pointer-
+/// relative offsets. `offset` is signed. Callsite records provide only the PC
+/// list for the owning function; the object list is not derived from callsite
+/// locations.
+void StackMaps::emitStackObjectBlob(MCStreamer &OS, const MCSymbol *FnSym,
+                                    const FunctionInfo &FnInfo,
+                                    unsigned StartIdx) {
+  SmallVector<const MCExpr *, 32> PCs;
+  for (uint64_t I = 0; I < FnInfo.RecordCount; ++I)
+    PCs.push_back(CSInfos[StartIdx + I].CSOffsetExpr);
+
+  if (PCs.empty() || FnInfo.StackObjects.empty())
+    return;
+
+  MCContext &OutContext = AP.OutStreamer->getContext();
+  const MCSymbolELF *FnSymELF = static_cast<const MCSymbolELF *>(FnSym);
+  const MCSymbolELF *Group = nullptr;
+  if (FnSym->isInSection())
+    Group = static_cast<const MCSectionELF &>(FnSym->getSection()).getGroup();
+
+  unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_LINK_ORDER;
+  if (Group)
+    Flags |= ELF::SHF_GROUP;
+
+  MCSectionELF *Sec = OutContext.getELFSection(
+      ".llvm_stackobjs", ELF::SHT_PROGBITS, Flags, /*EntrySize=*/0, Group,
+      /*IsComdat=*/Group != nullptr, MCSection::NonUniqueID, FnSymELF);
+  OS.switchSection(Sec);
+  OS.emitValueToAlignment(Align(8));
+
+  OS.AddComment("ROG stack object PC count");
+  OS.emitInt32(PCs.size());
+  MCContext &Ctx = OS.getContext();
+  for (const MCExpr *PCOffset : PCs) {
+    const MCExpr *PC = MCBinaryExpr::createAdd(
+        MCSymbolRefExpr::create(FnSym, Ctx), PCOffset, Ctx);
+    OS.emitValue(PC, sizeof(uintptr_t));
+  }
+
+  OS.AddComment("ROG stack object count");
+  OS.emitInt32(FnInfo.StackObjects.size());
+  for (const FunctionInfo::StackObjectInfo &Obj : FnInfo.StackObjects) {
+    OS.emitInt32(Obj.Kind);
+    OS.emitInt32(Obj.Offset);
+    OS.emitInt32(Obj.Size);
+  }
+  OS.emitValueToAlignment(Align(8));
 }

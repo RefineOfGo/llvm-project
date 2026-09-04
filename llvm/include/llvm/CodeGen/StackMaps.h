@@ -311,6 +311,17 @@ public:
   using ConstantPool = MapVector<uint64_t, uint64_t>;
 
   struct FunctionInfo {
+    struct StackObjectInfo {
+      enum ROGStackObjectKind : uint32_t {
+        ROGStackObjectRsp = 1,
+        ROGStackObjectRbp = 2,
+      };
+
+      ROGStackObjectKind Kind;
+      int32_t Offset;
+      uint32_t Size;
+    };
+
     uint64_t StackSize = 0;
     uint64_t RecordCount = 1;
     // ROG precise GC: the frame's callee-saved-register save area, as a
@@ -323,6 +334,10 @@ public:
     // the slot).
     int32_t CSRLo = 0;
     int32_t CSRHi = 0;
+    // ROG precise GC: function-level stack objects collected from alloca
+    // metadata through MachineFrameInfo. These are intentionally independent
+    // of callsite stackmap locations.
+    SmallVector<StackObjectInfo, 16> StackObjects;
 
     FunctionInfo() = default;
     explicit FunctionInfo(uint64_t StackSize) : StackSize(StackSize) {}
@@ -438,6 +453,13 @@ private:
   /// record in `CSInfos`.
   void emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
                                const FunctionInfo &FnInfo, unsigned StartIdx);
+
+  /// ROG precise GC: emit one function's stack-object list into a separate
+  /// `.llvm_stackobjs` section. The runtime indexes this section by return PC
+  /// and uses it to rebuild the frame's stack-object interval list before
+  /// scanning precise roots.
+  void emitStackObjectBlob(MCStreamer &OS, const MCSymbol *FnSym,
+                           const FunctionInfo &FnInfo, unsigned StartIdx);
 
   LLVM_ABI void print(raw_ostream &OS);
   void debug() { print(dbgs()); }

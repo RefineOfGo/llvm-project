@@ -53,6 +53,7 @@ static cl::opt<int> StackMapVersion(
 
 const char *StackMaps::WSMP = "Stack Maps: ";
 static constexpr char ROGStackObjMetadata[] = "rog.stackobj";
+static constexpr uint32_t ROGStackObjFlag = 1u << 30;
 
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
@@ -60,6 +61,18 @@ static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   const auto &MO = MI.getOperand(Idx + 1);
   assert(MO.isImm());
   return MO.getImm();
+}
+
+static bool isROGStackObjectSize(const StackMaps::Location &Loc) {
+  if (Loc.Type != StackMaps::Location::Constant)
+    return false;
+  uint32_t SizeFlags = static_cast<uint32_t>(std::max<int32_t>(Loc.Offset, 0));
+  return (SizeFlags & ROGStackObjFlag) != 0;
+}
+
+static bool isROGStackObjectDirect(const StackMaps::Location &Loc) {
+  return Loc.Type == StackMaps::Location::Direct &&
+         (uint32_t(Loc.Size) & ROGStackObjFlag) != 0;
 }
 
 StackMapOpers::StackMapOpers(const MachineInstr *MI)
@@ -795,14 +808,38 @@ void StackMaps::emitCallsiteEntry(MCStreamer &OS, const CallsiteInfo &CSI) {
   OS.AddComment("  Num Locations");
   OS.emitInt16(CSLocs.size());
 
-  for (const auto &Loc : CSLocs) {
+  bool EmitStackObjSizePlaceholder = false;
+  for (auto I = CSLocs.begin(), E = CSLocs.end(); I != E; ++I) {
+    Location Loc = *I;
+    if (EmitStackObjSizePlaceholder) {
+      Loc = Location(Location::Unprocessed, 0, 0, 0);
+      EmitStackObjSizePlaceholder = false;
+    } else if (isROGStackObjectDirect(Loc)) {
+      Loc = Location(Location::Unprocessed, 0, 0, 0);
+    } else if (Loc.Type == Location::Direct && std::next(I) != E &&
+               isROGStackObjectSize(*std::next(I))) {
+      Loc = Location(Location::Unprocessed, 0, 0, 0);
+      EmitStackObjSizePlaceholder = true;
+    }
     switch (Loc.Type) {
-      case Location::Unprocessed   : OS.AddComment("    Location: Unprocessed"  ); break;
-      case Location::Register      : OS.AddComment("    Location: Register"     ); break;
-      case Location::Direct        : OS.AddComment("    Location: Direct"       ); break;
-      case Location::Indirect      : OS.AddComment("    Location: Indirect"     ); break;
-      case Location::Constant      : OS.AddComment("    Location: Constant"     ); break;
-      case Location::ConstantIndex : OS.AddComment("    Location: ConstantIndex"); break;
+    case Location::Unprocessed:
+      OS.AddComment("    Location: Unprocessed");
+      break;
+    case Location::Register:
+      OS.AddComment("    Location: Register");
+      break;
+    case Location::Direct:
+      OS.AddComment("    Location: Direct");
+      break;
+    case Location::Indirect:
+      OS.AddComment("    Location: Indirect");
+      break;
+    case Location::Constant:
+      OS.AddComment("    Location: Constant");
+      break;
+    case Location::ConstantIndex:
+      OS.AddComment("    Location: ConstantIndex");
+      break;
     }
     OS.emitIntValue(Loc.Type, 1);
     OS.emitIntValue(0, 1);  // Reserved
@@ -979,19 +1016,21 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 /// runtime, costs a multi-GiB eager parse. Location lists at different records
 /// of one function draw from a small universe and are near-identical, so the
 /// blob factors the repetition out through two levels of sharing:
-///   - a slot dictionary of the distinct (kind, dwarf reg, offset, size|flags)
+///   - a slot dictionary of the distinct (kind, dwarf reg, offset, size)
 ///     locations, with each Direct's trailing size-annotation Constant already
 ///     folded in (mirroring the runtime reader's v3 folding, including the
-///     clamp of negative annotations to 0);
+///     clamp of negative annotations to 0). ROG stack-object witness locations
+///     become inert Unprocessed slots here, preserving blob shape while keeping
+///     their object metadata in `.llvm_stackobjs`.
 ///   - a table of the distinct live sets, each a bitmap over the dictionary;
 ///   - one 8-byte record per safepoint: instruction offset + set index, with
 ///     bit 31 carrying the "incomplete" flag (bit 63 of the v3 patchpoint ID)
 ///     and bit 30 carrying the "prologue-entry" flag (bit 62 of the ID; see
 ///     kROGPrologueEntryStackMapID in ROGRuntimeSymbols.h).
 /// Locations within a record are order-insensitive for the runtime (each is an
-/// independent root read / stack-object registration), so sets are sorted and
-/// deduplicated. Leading statepoint-metadata Constants and LiveOuts are
-/// dropped, exactly as the v3 runtime reader drops them.
+/// independent root read), so sets are sorted and deduplicated. Leading
+/// statepoint-metadata Constants and LiveOuts are dropped, exactly as the v3
+/// runtime reader drops them.
 ///
 /// Version history: 0x52 gave the set index all 31 low bits of a record;
 /// 0x53 narrowed it to 30 to make room for the prologue-entry flag; 0x54
@@ -1002,7 +1041,7 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
 /// linker's concatenation keeps each blob 8-aligned):
 ///   u8 0x54, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
 ///   u64 FunctionAddress, u64 StackSize, i32 CSRLo, i32 CSRHi
-///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size_flags }
+///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size }
 ///   <pad to 8>
 ///   u64 SetBits[NumSets][ceil(NumSlots/64)]
 ///   Record[NumRecords] { u32 instr_offset,
@@ -1014,7 +1053,9 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
     uint8_t Kind;
     uint16_t Reg;
     int32_t Offset;
-    uint32_t SizeFlags;
+    uint32_t Size;
+    uint64_t KeyA = 0;
+    uint64_t KeyB = 0;
   };
   SmallVector<Slot, 32> Dict;
   DenseMap<std::pair<uint64_t, uint64_t>, uint32_t> DictIdx;
@@ -1032,8 +1073,10 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
 
     // Fold the v3 location stream into semantic slots, mirroring the runtime
     // reader: value locations (Register/Direct/Indirect) are kept; a Constant
-    // immediately after a Direct is that Direct's size|flags annotation; any
-    // other Constant/ConstantIndex is statepoint metadata and dropped.
+    // immediately after a Direct is that Direct's size annotation; a size with
+    // ROGStackObjFlag turns the Direct into an inert placeholder so this
+    // stack object is not part of the normal root map; any other
+    // Constant/ConstantIndex is statepoint metadata and dropped.
     SmallVector<Slot, 64> RecSlots;
     bool AwaitingSize = false;
     for (const Location &Loc : CSI.Locations) {
@@ -1041,18 +1084,42 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
       case Location::Register:
       case Location::Indirect:
         RecSlots.push_back(
-            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*SizeFlags=*/0});
+            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*Size=*/0});
         AwaitingSize = false;
         break;
-      case Location::Direct:
+      case Location::Direct: {
         RecSlots.push_back(
-            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*SizeFlags=*/0});
-        AwaitingSize = true;
+            {uint8_t(Loc.Type), Loc.Reg, Loc.Offset, /*Size=*/0});
+        bool IsStackObjDirect = isROGStackObjectDirect(Loc);
+        if (IsStackObjDirect) {
+          RecSlots.back().Kind = uint8_t(Location::Unprocessed);
+          RecSlots.back().Reg = 0;
+          RecSlots.back().Offset = 0;
+          RecSlots.back().Size = 0;
+          RecSlots.back().KeyA = (uint64_t(Location::Direct) << 48) |
+                                 (uint64_t(Loc.Reg) << 32) |
+                                 uint64_t(uint32_t(Loc.Offset));
+          RecSlots.back().KeyB = Loc.Size;
+        }
+        AwaitingSize = !IsStackObjDirect;
         break;
+      }
       case Location::Constant:
         if (AwaitingSize) {
-          RecSlots.back().SizeFlags =
-              uint32_t(std::max<int32_t>(Loc.Offset, 0));
+          uint32_t Size = uint32_t(std::max<int32_t>(Loc.Offset, 0));
+          RecSlots.back().Size = Size;
+          if ((Size & ROGStackObjFlag) != 0) {
+            uint16_t Reg = RecSlots.back().Reg;
+            int32_t Offset = RecSlots.back().Offset;
+            RecSlots.back().Kind = uint8_t(Location::Unprocessed);
+            RecSlots.back().Reg = 0;
+            RecSlots.back().Offset = 0;
+            RecSlots.back().Size = 0;
+            RecSlots.back().KeyA = (uint64_t(Location::Direct) << 48) |
+                                   (uint64_t(Reg) << 32) |
+                                   uint64_t(uint32_t(Offset));
+            RecSlots.back().KeyB = Size;
+          }
           AwaitingSize = false;
         }
         break;
@@ -1061,14 +1128,15 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
         break;
       }
     }
-
     std::vector<uint32_t> Set;
     Set.reserve(RecSlots.size());
     for (const Slot &S : RecSlots) {
-      auto Key = std::make_pair((uint64_t(S.Kind) << 48) |
-                                    (uint64_t(S.Reg) << 32) |
-                                    uint64_t(uint32_t(S.Offset)),
-                                uint64_t(S.SizeFlags));
+      uint64_t KeyA =
+          S.KeyA ? S.KeyA
+                 : ((uint64_t(S.Kind) << 48) | (uint64_t(S.Reg) << 32) |
+                    uint64_t(uint32_t(S.Offset)));
+      uint64_t KeyB = S.KeyA ? S.KeyB : uint64_t(S.Size);
+      auto Key = std::make_pair(KeyA, KeyB);
       auto [It, New] = DictIdx.try_emplace(Key, Dict.size());
       if (New)
         Dict.push_back(S);
@@ -1123,11 +1191,21 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
 
   // Slot dictionary.
   for (const Slot &S : Dict) {
-    OS.emitIntValue(S.Kind, 1);
+    uint8_t Kind = S.Kind;
+    uint16_t Reg = S.Reg;
+    int32_t Offset = S.Offset;
+    uint32_t Size = S.Size;
+    if (Kind == uint8_t(Location::Direct) && (Size & ROGStackObjFlag) != 0) {
+      Kind = uint8_t(Location::Unprocessed);
+      Reg = 0;
+      Offset = 0;
+      Size = 0;
+    }
+    OS.emitIntValue(Kind, 1);
     OS.emitIntValue(0, 1); // Reserved.
-    OS.emitInt16(S.Reg);
-    OS.emitIntValue(static_cast<uint32_t>(S.Offset), 4);
-    OS.emitIntValue(S.SizeFlags, 4);
+    OS.emitInt16(Reg);
+    OS.emitIntValue(static_cast<uint32_t>(Offset), 4);
+    OS.emitIntValue(Size, 4);
   }
   OS.emitValueToAlignment(Align(8));
 

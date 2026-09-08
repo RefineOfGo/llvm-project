@@ -223,10 +223,13 @@ void StdThreadPool::processTasksWithJobserver() {
         Tasks.pop_front();
       } // The queue lock is released.
 
-      // Run the task. The job slot remains acquired during execution.
-      Task();
+      // Run and destroy the task before publishing its completion. Destroying
+      // captured RAII objects may enqueue more work in the same task group.
+      std::exchange(Task, {})();
 
       // The task has finished. Update the active count and notify any waiters.
+      bool Notify;
+      bool NotifyGroup;
       {
         std::lock_guard<std::mutex> LockGuard(QueueLock);
         --ActiveThreads;
@@ -235,10 +238,18 @@ void StdThreadPool::processTasksWithJobserver() {
           if (--(A->second) == 0)
             ActiveGroups.erase(A);
         }
-        // If all tasks are complete, notify any waiting threads.
-        if (workCompletedUnlocked(nullptr))
-          CompletionCondition.notify_all();
+        Notify = workCompletedUnlocked(GroupOfTask);
+        NotifyGroup = GroupOfTask != nullptr && Notify;
       }
+      // Notify task completion if this was the last task in its group (or the
+      // last task in the pool for ungrouped work).
+      if (Notify)
+        CompletionCondition.notify_all();
+      // A worker waiting recursively for a group sleeps on QueueCondition while
+      // processing other work. Wake it when another jobserver worker completes
+      // the final task in that group.
+      if (NotifyGroup)
+        QueueCondition.notify_all();
     }
   }
 }

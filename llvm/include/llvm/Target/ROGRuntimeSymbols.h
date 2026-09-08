@@ -4,6 +4,7 @@
 namespace llvm {
 static const char *        kROGStackLimit           = "rog_stack_limit";
 static const char *        kROGStackCheckFn         = "rog_morestack_abi";
+static const char *        kROGStackCheckFnLarge    = "rog_morestack_abi_large";
 static const char *        kROGStackCheckAttr       = "rog-stack-check";
 static const unsigned long kROGStackRedZoneSize     = 1024;
 // Stackmap ID of the record adjustForROGPrologue emits at the return point

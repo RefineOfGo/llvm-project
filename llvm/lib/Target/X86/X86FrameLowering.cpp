@@ -3803,9 +3803,24 @@ void X86FrameLowering::adjustForROGPrologue(
     allocMBB->sortUniqueLiveIns();
   }
 
-  BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
-    .addUse(X86::R11, RegState::ImplicitKill)
-    .addExternalSymbol(kROGStackCheckFn);
+  if (MF.getTarget().getCodeModel() == CodeModel::Large) {
+    // The stack-growth target may be more than 2 GiB away from a large-model
+    // function, so a direct rel32 call is not representable. Preserve the
+    // needed stack pointer outside ROG's XMM0-XMM7 argument bank, materialize
+    // the full target address in R11, and call through it. The runtime's large
+    // entry restores R11 before entering the common morestack implementation.
+    BuildMI(allocMBB, DL, TII.get(X86::MOV64toPQIrr), X86::XMM8)
+        .addReg(X86::R11, RegState::Kill);
+    BuildMI(allocMBB, DL, TII.get(X86::MOV64ri), X86::R11)
+        .addExternalSymbol(kROGStackCheckFnLarge);
+    BuildMI(allocMBB, DL, TII.get(X86::CALL64r))
+        .addReg(X86::R11, RegState::Kill)
+        .addUse(X86::XMM8, RegState::ImplicitKill);
+  } else {
+    BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+        .addUse(X86::R11, RegState::ImplicitKill)
+        .addExternalSymbol(kROGStackCheckFn);
+  }
 
   // ROG precise GC: a stackmap record at the stack-growth call's return
   // point. The frame-pointer chain drops this function's caller at that call

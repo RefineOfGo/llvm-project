@@ -1,4 +1,5 @@
-; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s --check-prefixes=CHECK,SMALL
+; RUN: llc -O3 -verify-machineinstrs -code-model=large < %s | FileCheck %s --check-prefixes=CHECK,LARGE
 
 ; A "rog-stack-check" function calls rog_morestack_abi BEFORE it establishes
 ; RBP, so the GC's frame-pointer walk drops this function's caller at that
@@ -20,7 +21,10 @@ define rogcc ptr @grow_with_stack_args(
     ptr %a4, ptr %a5, ptr %a6, ptr %a7,
     ptr %s0, ptr %s1) #0 gc "statepoint-example" {
 ; CHECK-LABEL: grow_with_stack_args:
-; CHECK:         callq rog_morestack_abi
+; SMALL:         callq rog_morestack_abi
+; LARGE:         movq %r11, %xmm8
+; LARGE-NEXT:    movabsq $rog_morestack_abi_large, %r11
+; LARGE-NEXT:    callq *%r11
 ; CHECK-NEXT:  .Ltmp[[PE:[0-9]+]]:
 entry:
   call rogcc token (i64, i32, ptr, i32, i32, ...)
@@ -36,7 +40,10 @@ entry:
 ; trusting toolchain provenance.
 define rogcc ptr @grow_reg_only(ptr %a0, ptr %a1) #0 gc "statepoint-example" {
 ; CHECK-LABEL: grow_reg_only:
-; CHECK:         callq rog_morestack_abi
+; SMALL:         callq rog_morestack_abi
+; LARGE:         movq %r11, %xmm8
+; LARGE-NEXT:    movabsq $rog_morestack_abi_large, %r11
+; LARGE-NEXT:    callq *%r11
 ; CHECK-NEXT:  .Ltmp[[PE2:[0-9]+]]:
 entry:
   call rogcc token (i64, i32, ptr, i32, i32, ...)

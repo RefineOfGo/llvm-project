@@ -1150,8 +1150,8 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
 ///   - stack-object-set index -> sorted stack-object intervals
 ///
 /// Layout (little-endian, pointer-sized PCs):
-///   u32 NumPCs
-///   uintptr PC[NumPCs]
+///   u32 NumPCs (high bit set for field-relative PCs in PIC output)
+///   uintptr PC[NumPCs] (absolute or field-relative)
 ///   u32 NumStackObjects
 ///   StackObject[NumStackObjects] { u32 kind, i32 offset, u32 size }
 ///
@@ -1186,11 +1186,22 @@ void StackMaps::emitStackObjectBlob(MCStreamer &OS, const MCSymbol *FnSym,
   OS.emitValueToAlignment(Align(8));
 
   OS.AddComment("ROG stack object PC count");
-  OS.emitInt32(PCs.size());
+  // Match compact stackmaps: field-relative PCs avoid absolute relocations
+  // against function symbols when this read-only section is linked into a DSO.
+  // The count's high bit distinguishes this from the legacy absolute format.
+  if (PCs.size() >= (uint64_t(1) << 31))
+    report_fatal_error("ROG stack object PC count is not representable");
+  const bool PCRelative = AP.isPositionIndependent();
+  OS.emitInt32(uint32_t(PCs.size()) | (PCRelative ? (uint32_t(1) << 31) : 0));
   MCContext &Ctx = OS.getContext();
   for (const MCExpr *PCOffset : PCs) {
     const MCExpr *PC = MCBinaryExpr::createAdd(
         MCSymbolRefExpr::create(FnSym, Ctx), PCOffset, Ctx);
+    if (PCRelative) {
+      MCSymbol *Here = Ctx.createTempSymbol();
+      OS.emitLabel(Here);
+      PC = MCBinaryExpr::createSub(PC, MCSymbolRefExpr::create(Here, Ctx), Ctx);
+    }
     OS.emitValue(PC, sizeof(uintptr_t));
   }
 

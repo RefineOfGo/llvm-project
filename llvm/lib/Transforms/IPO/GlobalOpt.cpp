@@ -2024,7 +2024,10 @@ OptimizeFunctions(Module &M,
       }
     }
 
-    if (hasChangeableCC(&F, ChangeableCCCache) && F.getCallingConv() != CallingConv::ROG) {
+    if (hasChangeableCC(&F, ChangeableCCCache) &&
+        F.getCallingConv() != CallingConv::ROG &&
+        F.getCallingConv() != CallingConv::GoABI0 &&
+        F.getCallingConv() != CallingConv::GoABIInternal) {
       // If this function has a calling convention worth changing, is not a
       // varargs function, is only called directly, and is supported by the
       // target, promote it to use the Fast calling convention.

@@ -389,6 +389,19 @@ static bool CC_X86_64_ROG_I128(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
   return CC_X86_64_I128_Generic(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State, Regs);
 }
 
+static bool CC_X86_64_GoABI0(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                             CCValAssign::LocInfo &LocInfo,
+                             ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+  if (ArgFlags.isByVal())
+    return false;
+
+  unsigned Size = X86GoABI0StackSlotSize(LocVT);
+  Align Alignment = X86GoABI0StackSlotAlign(LocVT);
+  int64_t Offset = State.AllocateStack(Size, Alignment);
+  State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+  return true;
+}
+
 /// Special handling for i128 and fp128: on x86-32, i128 and fp128 get legalized
 /// as four i32s, but fp128 must be passed on the stack with 16-byte alignment.
 /// Technically only fp128 has a specified ABI, but it makes sense to handle

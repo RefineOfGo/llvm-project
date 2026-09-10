@@ -3142,6 +3142,8 @@ void Verifier::visitFunction(const Function &F) {
           &F);
     [[fallthrough]];
   case CallingConv::ROG:
+  case CallingConv::GoABI0:
+  case CallingConv::GoABIInternal:
   case CallingConv::Fast:
   case CallingConv::Cold:
   case CallingConv::Intel_OCL_BI:
@@ -3149,6 +3151,15 @@ void Verifier::visitFunction(const Function &F) {
   case CallingConv::PTX_Device:
     Check(!F.isVarArg(),
           "Calling convention does not support varargs or perfect forwarding!",
+          &F);
+    // go_abi0cc returns its results in caller-allocated ABI0 stack slots, which
+    // is only modeled on the caller side (LowerCall). RetCC_X86_64 has no GoABI0
+    // entry, so a *defined* go_abi0cc callee would return via the normal SysV
+    // register convention and its callers would read stale stack bytes. The CC
+    // is only meant for external Plan 9 asm bodies, so reject definitions.
+    Check(F.getCallingConv() != CallingConv::GoABI0 || F.isDeclaration(),
+          "go_abi0cc is only supported on external declarations, not function "
+          "definitions",
           &F);
     break;
   case CallingConv::AMDGPU_Gfx_WholeWave:

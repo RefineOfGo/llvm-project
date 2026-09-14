@@ -689,12 +689,27 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
 
   LLVM_DEBUG(dbgs() << LowerAsVReg.size() << " pointers will go in vregs\n");
 
+  // ROG: -O0 selects the fast register allocator, which cannot fold a
+  // STATEPOINT operand into a stack slot. Every virtual-register use of the
+  // instruction then needs its own physical register, on top of the registers
+  // pre-assigned to the call's arguments (rogcc passes the first eight integer
+  // arguments in GPRs), so a call with many register arguments and many roots
+  // live across it exhausts the allocatable GPRs and RA fails with "ran out of
+  // registers". Only the optimizing allocator can fold statepoint operands,
+  // and the slot-liveness pass that relies on vreg deopt values (RogQueryDeopt)
+  // runs only in that pipeline, so pre-spill every deopt value at -O0: the
+  // roots reach the stack map as indirect slot locations.
+  const bool FastRegAlloc =
+      Builder.DAG.getTarget().getOptLevel() == CodeGenOptLevel::None;
+
   auto requireSpillSlot = [&](const Value *V) {
     if (!Builder.DAG.getTargetLoweringInfo().isTypeLegal(
              Builder.getValue(V).getValueType()))
       return true;
     if (isGCValue(V, Builder))
       return !LowerAsVReg.count(Builder.getValue(V));
+    if (FastRegAlloc)
+      return true;
     // ROG kill switch: ROG_DISABLE_PRECISE_DEOPT forces pre-spilling (the old
     // GC-safe behavior), keeping deopt values off vregs so the strip/query
     // passes -- which also bail under this env -- have nothing to do.

@@ -629,6 +629,13 @@ public:
   /// the metadata is already present or the table has no entry.
   LLVM_ABI void materializeGUIDMetadata();
 
+  /// Attach \p G as this value's \c !guid metadata, replacing any existing
+  /// attachment. Unlike \c assignGUID this does not invent a GUID, so it is
+  /// safe to expose: the caller must already hold the value's GUID. \c IRMover
+  /// needs it to carry a GUID across modules when the source value's
+  /// attachment was never materialized.
+  LLVM_ABI void setGUIDMetadata(GUID G);
+
   /// Return a 64-bit global unique ID constructed from the name of a global
   /// symbol. Since this call doesn't supply the linkage or defining filename,
   /// the GUID computation will assume that the global has external linkage.

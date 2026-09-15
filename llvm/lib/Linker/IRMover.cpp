@@ -670,6 +670,24 @@ GlobalValue *IRLinker::copyGlobalValueProto(const GlobalValue *SGV,
     }
   }
 
+  // A source module loaded lazily for ThinLTO importing may have skipped its
+  // !guid attachments, keeping the GUID only in Module::ValueToGUIDMap, which
+  // does not travel with the value. A value that stays a declaration here gets
+  // its GUID from getGUIDIfAssigned()'s name hash, which reproduces the stored
+  // GUID unless the source value was a promoted local and got renamed. Pin the
+  // GUID down in that case, and only in that case, so that the common
+  // unrenamed declaration stays free of the attachment. Definitions are not
+  // handled here: FunctionImporter materializes their attachment on the source
+  // value, and copyMetadata carries it over.
+  if (!ForDefinition)
+    if (auto *NewGO = dyn_cast<GlobalObject>(NewGV);
+        NewGO && !NewGO->getMetadata(LLVMContext::MD_unique_id))
+      if (std::optional<GlobalValue::GUID> MaybeGUID =
+              SGV->getParent()->getGUID(SGV);
+          MaybeGUID && *MaybeGUID != GlobalValue::getGUIDAssumingExternalLinkage(
+                                         NewGO->getName()))
+        NewGO->setGUIDMetadata(*MaybeGUID);
+
   // Remove these copied constants in case this stays a declaration, since
   // they point to the source module. If the def is linked the values will
   // be mapped in during linkFunctionBody.

@@ -93,6 +93,29 @@ void GlobalValue::assignGUID() {
                                     Type::getInt64Ty(getContext()), G))}));
 }
 
+void GlobalValue::materializeGUIDMetadata() {
+  // Only GlobalObjects carry metadata attachments; getGUIDIfAssigned() derives
+  // an alias' GUID from its name and never consults the table.
+  if (!isa<GlobalObject>(this))
+    return;
+
+  if (getGUIDMetadata() != nullptr)
+    return;
+
+  auto MaybeGUID = getParent()->getGUID(this);
+  if (!MaybeGUID)
+    return;
+
+  setGUIDMetadata(*MaybeGUID);
+}
+
+void GlobalValue::setGUIDMetadata(GUID G) {
+  assert(isa<GlobalObject>(this) && "only GlobalObjects carry metadata");
+  setMetadata(LLVMContext::MD_unique_id,
+              MDNode::get(getContext(), {ConstantAsMetadata::get(ConstantInt::get(
+                                            Type::getInt64Ty(getContext()), G))}));
+}
+
 void GlobalValue::reassignGUID() {
   if (!getGUIDMetadata())
     return;

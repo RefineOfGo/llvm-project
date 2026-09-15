@@ -62,6 +62,12 @@
 
 using namespace llvm;
 
+static cl::opt<bool> SkipRedundantGUIDAttachments(
+    "skip-redundant-guid-attachments", cl::init(true), cl::Hidden,
+    cl::desc("When lazily loading a module for ThinLTO importing, do not "
+             "materialize !guid attachments that are already recoverable "
+             "from the module's GUID table"));
+
 #define DEBUG_TYPE "bitcode-reader"
 
 STATISTIC(NumMDStringLoaded, "Number of MDStrings loaded");
@@ -477,7 +483,8 @@ class MetadataLoader::MetadataLoaderImpl {
   Error parseMetadataStrings(ArrayRef<uint64_t> Record, StringRef Blob,
                              function_ref<void(StringRef)> CallBack);
   Error parseGlobalObjectAttachment(GlobalObject &GO,
-                                    ArrayRef<uint64_t> Record);
+                                    ArrayRef<uint64_t> Record,
+                                    bool SkipRedundantGUID = false);
   Error parseMetadataKindRecord(SmallVectorImpl<uint64_t> &Record);
 
   void resolveForwardRefsAndPlaceholders(PlaceholderQueue &Placeholders);
@@ -1071,7 +1078,8 @@ Expected<bool> MetadataLoader::MetadataLoaderImpl::loadGlobalDeclAttachments() {
       // would require parsing from locations stored in the index.
       CurrentPos = TempCursor.GetCurrentBitNo();
       if (Error Err = parseGlobalObjectAttachment(
-              *GO, ArrayRef<uint64_t>(Record).slice(1)))
+              *GO, ArrayRef<uint64_t>(Record).slice(1),
+              /*SkipRedundantGUID=*/SkipRedundantGUIDAttachments))
         return std::move(Err);
       if (Error Err = TempCursor.JumpToBit(CurrentPos))
         return std::move(Err);
@@ -2521,12 +2529,24 @@ Error MetadataLoader::MetadataLoaderImpl::parseMetadataStrings(
 }
 
 Error MetadataLoader::MetadataLoaderImpl::parseGlobalObjectAttachment(
-    GlobalObject &GO, ArrayRef<uint64_t> Record) {
+    GlobalObject &GO, ArrayRef<uint64_t> Record, bool SkipRedundantGUID) {
   assert(Record.size() % 2 == 0);
   for (unsigned I = 0, E = Record.size(); I != E; I += 2) {
     auto K = MDKindMap.find(Record[I]);
     if (K == MDKindMap.end())
       return error("Invalid ID");
+    // The !guid attachment of a lazily loaded module is redundant with that
+    // module's GUID table, which BitcodeReader has already read into
+    // Module::ValueToGUIDMap. Materializing it allocates an MDNode, a
+    // ConstantAsMetadata and a ConstantInt per global object -- all interned
+    // in the LLVMContext and never reclaimed -- and a ThinLTO backend pays
+    // that for every module it opens to import from. Skip it:
+    // GlobalValue::getGUIDIfAssigned() falls back to the table, and
+    // FunctionImporter materializes the attachment again for the values it
+    // actually moves out of the module.
+    if (SkipRedundantGUID && K->second == LLVMContext::MD_unique_id &&
+        GO.getParent()->getGUID(&GO))
+      continue;
     MDNode *MD =
         dyn_cast_or_null<MDNode>(getMetadataFwdRefOrLoad(Record[I + 1]));
     if (!MD)

@@ -4166,9 +4166,12 @@ Error BitcodeReader::globalCleanup() {
   }
 
   // Force deallocation of memory for these vectors to favor the client that
-  // want lazy deserialization.
+  // want lazy deserialization. GUIDList has been drained into the module's
+  // GUID map above and is dead from here on; it is one entry per module-level
+  // value, so holding it for the reader's lifetime is not free.
   std::vector<std::pair<GlobalVariable *, unsigned>>().swap(GlobalInits);
   std::vector<std::pair<GlobalValue *, unsigned>>().swap(IndirectSymbolInits);
+  std::vector<GlobalValue::GUID>().swap(GUIDList);
   return Error::success();
 }
 

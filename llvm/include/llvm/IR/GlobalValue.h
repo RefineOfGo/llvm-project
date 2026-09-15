@@ -617,6 +617,18 @@ private:
   MDNode *getGUIDMetadata() const;
 
 public:
+  /// Materialize the \c !guid metadata from the parent module's GUID table
+  /// (populated from \c MODULE_CODE_GUIDLIST) when the metadata itself was
+  /// not loaded.
+  ///
+  /// Modules opened for ThinLTO importing are loaded lazily and skip the
+  /// \c !guid attachments of their global variables, because the GUID is
+  /// already recoverable from the module's GUID table. A value that is about
+  /// to be moved into another module by \c IRMover needs the attachment
+  /// back, since the table does not travel with the value. Does nothing if
+  /// the metadata is already present or the table has no entry.
+  LLVM_ABI void materializeGUIDMetadata();
+
   /// Return a 64-bit global unique ID constructed from the name of a global
   /// symbol. Since this call doesn't supply the linkage or defining filename,
   /// the GUID computation will assume that the global has external linkage.

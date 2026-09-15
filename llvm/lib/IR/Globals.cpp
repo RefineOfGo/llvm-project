@@ -93,6 +93,20 @@ void GlobalValue::assignGUID() {
                                     Type::getInt64Ty(getContext()), G))}));
 }
 
+void GlobalValue::materializeGUIDMetadata() {
+  if (getGUIDMetadata() != nullptr)
+    return;
+
+  auto MaybeGUID = getParent()->getGUID(this);
+  if (!MaybeGUID)
+    return;
+
+  setMetadata(LLVMContext::MD_unique_id,
+              MDNode::get(getContext(),
+                          {ConstantAsMetadata::get(ConstantInt::get(
+                              Type::getInt64Ty(getContext()), *MaybeGUID))}));
+}
+
 void GlobalValue::reassignGUID() {
   if (!getGUIDMetadata())
     return;

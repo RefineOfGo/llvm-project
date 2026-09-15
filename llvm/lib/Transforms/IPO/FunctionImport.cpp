@@ -2408,6 +2408,11 @@ Expected<bool> FunctionImporter::importFunctions(
         if (ImportDefinition) {
           if (Error Err = F.materialize())
             return std::move(Err);
+          // The source module may have been loaded lazily, in which case its
+          // !guid attachment was not materialized. IRMover only carries
+          // metadata attachments across, not the module's GUID table, so
+          // restore the attachment for the values we are about to move.
+          F.materializeGUIDMetadata();
           // MemProf should match function's definition and summary,
           // 'thinlto_src_module' is needed.
           if (EnableImportMetadata || EnableMemProfContextDisambiguation) {
@@ -2448,6 +2453,7 @@ Expected<bool> FunctionImporter::importFunctions(
         if (ImportDefinition) {
           if (Error Err = GV.materialize())
             return std::move(Err);
+          GV.materializeGUIDMetadata();
           ImportedGVCount += GlobalsToImport.insert(&GV);
         }
       }

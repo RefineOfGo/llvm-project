@@ -1521,8 +1521,13 @@ static std::string getVarName(InstrProfInstBase *Inc, StringRef Prefix,
   StringRef Name = Inc->getName()->getName().substr(NamePrefix.size());
   Function *F = Inc->getParent()->getParent();
   Module *M = F->getParent();
-  if (!DoHashBasedCounterSplit || !isIRPGOFlagSet(M) ||
-      !canRenameComdatFunc(*F)) {
+  // Weak ODR definitions cannot be renamed like discardable COMDAT functions,
+  // but their profile storage still needs to distinguish different CFGs after
+  // pre-instrumentation inlining. Splitting only the storage preserves the
+  // function's linkage and address, including references from other modules.
+  bool CanSplitCounters = canRenameComdatFunc(*F) ||
+                          (F->hasWeakODRLinkage() && F->hasComdat());
+  if (!DoHashBasedCounterSplit || !isIRPGOFlagSet(M) || !CanSplitCounters) {
     Renamed = false;
     return (Prefix + Name).str();
   }

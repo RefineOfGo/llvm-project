@@ -267,6 +267,21 @@ void ReassociatePass::canonicalizeOperands(Instruction *I) {
   Value *RHS = I->getOperand(1);
   if (LHS == RHS || isa<Constant>(RHS))
     return;
+  // Preserve the evaluation order of short-circuit conditions folded by
+  // SimplifyCFG. Code generation may split them back into branches. Moving
+  // constants to the RHS is still useful; rank-only commutation can change
+  // the resulting short-circuit order.
+  if (I->getType()->isIntegerTy(1) &&
+      (I->getOpcode() == Instruction::And ||
+       I->getOpcode() == Instruction::Or) &&
+      I->hasOneUse() && isa<CondBrInst>(*I->user_begin())) {
+    auto *LCmp = dyn_cast<CmpInst>(LHS);
+    auto *RCmp = dyn_cast<CmpInst>(RHS);
+    if (LCmp && RCmp && LCmp->hasOneUse() && RCmp->hasOneUse() &&
+        LCmp->getParent() == I->getParent() &&
+        RCmp->getParent() == I->getParent())
+      return;
+  }
   if (isa<Constant>(LHS) || getRank(RHS) < getRank(LHS)) {
     cast<BinaryOperator>(I)->swapOperands();
     MadeChange = true;

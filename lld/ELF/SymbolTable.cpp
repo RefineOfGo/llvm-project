@@ -165,6 +165,41 @@ SmallVector<Symbol *, 0> SymbolTable::findByVersion(SymbolVersion ver) {
   return {};
 }
 
+// An escaped literal is still classified as a wildcard by hasWildcard().
+// Recover its spelling so large dynamic lists and version scripts do not
+// require a full symbol table scan for each such pattern. Leave actual globs
+// and quoted matcher syntax to SingleStringMatcher.
+//
+// '{' and '}' are plain characters today because lld never passes
+// MaxSubPatterns to GlobPattern::create(), but we bail on them anyway so that
+// enabling brace expansion later cannot silently change what this decodes.
+// Decoding also assumes SingleStringMatcher uses GlobPattern with
+// SlashAgnostic=false: a backslash is not also a slash.
+static std::optional<std::string> getEscapedLiteral(StringRef pattern) {
+  if (!pattern.contains('\\') || pattern.starts_with("\""))
+    return std::nullopt;
+  std::string literal;
+  for (size_t i = 0; i != pattern.size(); ++i) {
+    char c = pattern[i];
+    if (c == '\\') {
+      if (++i == pattern.size())
+        return std::nullopt;
+      c = pattern[i];
+    } else if (c == '*' || c == '?' || c == '[' || c == '{' || c == '}') {
+      return std::nullopt;
+    }
+    literal += c;
+  }
+  // insert() keys a default version "foo@@v1" by its stem "foo", so that
+  // spelling owns no hash-table entry. Mirror that exact rule: every other
+  // name, including one holding a lone '@', is its own key.
+  size_t pos = literal.find('@');
+  if (pos != std::string::npos && pos + 1 < literal.size() &&
+      literal[pos + 1] == '@')
+    return std::nullopt;
+  return literal;
+}
+
 SmallVector<Symbol *, 0> SymbolTable::findAllByVersion(SymbolVersion ver,
                                                        bool includeNonDefault) {
   SmallVector<Symbol *, 0> res;
@@ -183,6 +218,18 @@ SmallVector<Symbol *, 0> SymbolTable::findAllByVersion(SymbolVersion ver,
         for (Symbol *sym : p.second)
           if (check(*sym))
             res.push_back(sym);
+    return res;
+  }
+
+  // Version scanning precedes both symbol-version name truncation and
+  // redirectSymbols()/wrap(), so a symbol's hash-table key is still derived
+  // from its current name. find() can nonetheless return a symbol spelled
+  // differently from the key it was reached by ("foo@@v1" is keyed by "foo"),
+  // so the match below is load bearing rather than redundant.
+  if (auto literal = getEscapedLiteral(ver.name)) {
+    if (Symbol *sym = find(*literal))
+      if (canBeVersioned(*sym) && check(*sym) && m.match(sym->getName()))
+        res.push_back(sym);
     return res;
   }
 

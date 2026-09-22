@@ -1992,10 +1992,16 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
   // STV_DEFAULT symbols are not bound to definitions within the shared object,
   // even if other options express a symbolic intention: -Bsymbolic,
   // -Bsymbolic-functions (if STT_FUNC), --dynamic-list.
-  for (auto *arg : args.filtered(OPT_export_dynamic_symbol))
-    ctx.arg.dynamicList.push_back(
-        {arg->getValue(), /*isExternCpp=*/false,
-         /*hasWildcard=*/hasWildcard(arg->getValue())});
+  for (auto *arg : args.filtered(OPT_export_dynamic_symbol)) {
+    StringRef pattern = arg->getValue();
+    if (auto literal = getEscapedLiteral(pattern))
+      ctx.arg.dynamicList.push_back({ctx.saver.save(*literal),
+                                     /*isExternCpp=*/false,
+                                     /*hasWildcard=*/false});
+    else
+      ctx.arg.dynamicList.push_back({pattern, /*isExternCpp=*/false,
+                                     /*hasWildcard=*/hasWildcard(pattern)});
+  }
 
   // --export-dynamic-symbol-list specifies a list of --export-dynamic-symbol
   // patterns. --dynamic-list is --export-dynamic-symbol-list plus -Bsymbolic

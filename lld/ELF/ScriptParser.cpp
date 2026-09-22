@@ -1801,6 +1801,49 @@ bool elf::hasWildcard(StringRef s) {
   return s.find_first_of("?*[") != StringRef::npos;
 }
 
+// hasWildcard() is purely lexical, so an escaped metacharacter still reads as
+// a glob: "foo\*" is classified as a wildcard although it can only ever match
+// the single name "foo*". Recover that spelling so the pattern takes the
+// exact-match path instead, which is both what GNU ld does and a hash lookup
+// rather than a scan of every symbol.
+//
+// Returns std::nullopt for real globs and for quoted matcher syntax, which
+// SingleStringMatcher handles on its own. '{' and '}' are plain characters
+// today because lld never passes MaxSubPatterns to GlobPattern::create(), but
+// we bail on them anyway so that enabling brace expansion later cannot
+// silently change what this decodes. Decoding also assumes GlobPattern is
+// built with SlashAgnostic=false: a backslash is not also a slash.
+std::optional<std::string> elf::getEscapedLiteral(StringRef pattern) {
+  if (!pattern.contains('\\') || pattern.starts_with("\""))
+    return std::nullopt;
+  std::string literal;
+  for (size_t i = 0; i != pattern.size(); ++i) {
+    char c = pattern[i];
+    if (c == '\\') {
+      // A stray trailing backslash is an invalid glob. Leave the diagnostic
+      // to GlobPattern::create().
+      if (++i == pattern.size())
+        return std::nullopt;
+      c = pattern[i];
+    } else if (c == '*' || c == '?' || c == '[' || c == '{' || c == '}') {
+      return std::nullopt;
+    }
+    literal += c;
+  }
+  return literal;
+}
+
+// Builds a version pattern from a script token. Only a token that would
+// otherwise be treated as a glob is decoded, and a quoted one is left to
+// SingleStringMatcher, so this changes nothing else about the classification.
+static SymbolVersion makeSymbolVersion(Ctx &ctx, const StringRef &tok,
+                                       bool isExternCpp, bool hasWildcard) {
+  if (hasWildcard && !tok.starts_with("\""))
+    if (auto literal = getEscapedLiteral(tok))
+      return {ctx.saver.save(*literal), isExternCpp, /*hasWildcard=*/false};
+  return {unquote(tok), isExternCpp, hasWildcard};
+}
+
 // Reads a list of symbols, e.g. "{ global: foo; bar; local: *; };".
 std::pair<SmallVector<SymbolVersion, 0>, SmallVector<SymbolVersion, 0>>
 ScriptParser::readSymbols() {
@@ -1821,7 +1864,8 @@ ScriptParser::readSymbols() {
         v = &globals;
         continue;
       }
-      v->push_back({unquote(tok), false, hasWildcard(tok)});
+      v->push_back(
+          makeSymbolVersion(ctx, tok, /*isExternCpp=*/false, hasWildcard(tok)));
     }
     expect(";");
   }
@@ -1842,8 +1886,8 @@ SmallVector<SymbolVersion, 0> ScriptParser::readVersionExtern() {
 
   SmallVector<SymbolVersion, 0> ret;
   while (auto tok = till("}")) {
-    ret.push_back(
-        {unquote(tok), isCXX, !tok.str.starts_with("\"") && hasWildcard(tok)});
+    ret.push_back(makeSymbolVersion(
+        ctx, tok, isCXX, !tok.str.starts_with("\"") && hasWildcard(tok)));
     if (consume("}"))
       return ret;
     expect(";");

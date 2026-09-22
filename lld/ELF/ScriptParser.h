@@ -11,6 +11,8 @@
 
 #include "lld/Common/LLVM.h"
 #include "llvm/Support/MemoryBufferRef.h"
+#include <optional>
+#include <string>
 
 namespace lld::elf {
 struct Ctx;
@@ -28,6 +30,9 @@ void readDynamicList(Ctx &ctx, MemoryBufferRef mb);
 void readDefsym(Ctx &ctx, MemoryBufferRef mb);
 
 bool hasWildcard(StringRef s);
+
+// If a pattern can only ever match one name, return that name.
+std::optional<std::string> getEscapedLiteral(StringRef s);
 
 } // namespace lld::elf
 

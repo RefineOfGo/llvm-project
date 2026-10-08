@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=x86_64-unknown-linux-gnu -enable-shrink-wrap=true < %s | FileCheck %s
+; RUN: llc -mtriple=x86_64-unknown-linux-gnu -enable-shrink-wrap=true -enable-rog-stack-check < %s | FileCheck %s
 
 ; ROG stack checks must remain at function entry because they are also
 ; preemption checkpoints. The ordinary frame setup can still be shrink-wrapped
@@ -9,7 +9,7 @@
 define rogcc i64 @swcase(i64 %x) nounwind "rog-stack-check" "frame-pointer"="all" gc "rog" {
 ; CHECK-LABEL: swcase:
 ; CHECK:       # %bb.0:
-; CHECK-NEXT:    cmpq %fs:128, %rsp
+; CHECK-NEXT:    cmpq %fs:-16, %rsp
 ; CHECK-NEXT:    jbe .LBB0_[[MORESTACK:[0-9]+]]
 ; CHECK-NEXT:  # %bb.1: # %entry
 ; CHECK-NEXT:    testq %rax, %rax
@@ -25,11 +25,14 @@ define rogcc i64 @swcase(i64 %x) nounwind "rog-stack-check" "frame-pointer"="all
 ; CHECK-NEXT:  .LBB0_[[MORESTACK]]:
 ; CHECK-NEXT:    leaq -520(%rsp), %r11
 ; CHECK-NEXT:    callq rog_morestack_abi
+; CHECK-NEXT:  .Ltmp[[STACKMAP_RET:[0-9]+]]:
 ; CHECK-NEXT:    testq %rax, %rax
 ; CHECK-NEXT:    jne .LBB0_[[COLD]]
 ; CHECK-NEXT:  .LBB0_[[FAST]]: # %fast
 ; CHECK-NEXT:    movl $7, %eax
 ; CHECK-NEXT:    retq
+; CHECK:         .long .Ltmp[[STACKMAP_RET]]-swcase
+; CHECK-NEXT:    .long 1073741824
 entry:
   %a = alloca %array, align 8
   %is_zero = icmp eq i64 %x, 0

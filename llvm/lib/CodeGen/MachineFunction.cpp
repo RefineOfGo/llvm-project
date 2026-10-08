@@ -367,7 +367,8 @@ Align MachineFunction::getPreferredAlignment() const {
 }
 
 bool MachineFunction::shouldEmitStackCheckROG() const {
-  return getFunction().hasFnAttribute(kROGStackCheckAttr);
+  return isROGStackCheckEnabled() &&
+         getFunction().hasFnAttribute(kROGStackCheckAttr);
 }
 
 [[nodiscard]] unsigned

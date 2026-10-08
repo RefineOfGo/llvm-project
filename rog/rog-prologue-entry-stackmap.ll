@@ -1,5 +1,6 @@
-; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s --check-prefixes=CHECK,SMALL
-; RUN: llc -O3 -verify-machineinstrs -code-model=large < %s | FileCheck %s --check-prefixes=CHECK,LARGE
+; RUN: llc -O3 -verify-machineinstrs < %s | FileCheck %s --check-prefix=DISABLED
+; RUN: llc -O3 -verify-machineinstrs -enable-rog-stack-check < %s | FileCheck %s --check-prefixes=CHECK,SMALL
+; RUN: llc -O3 -verify-machineinstrs -enable-rog-stack-check -code-model=large < %s | FileCheck %s --check-prefixes=CHECK,LARGE
 
 ; A "rog-stack-check" function calls rog_morestack_abi BEFORE it establishes
 ; RBP, so the GC's frame-pointer walk drops this function's caller at that
@@ -20,6 +21,8 @@ define rogcc ptr @grow_with_stack_args(
     ptr %a0, ptr %a1, ptr %a2, ptr %a3,
     ptr %a4, ptr %a5, ptr %a6, ptr %a7,
     ptr %s0, ptr %s1) #0 gc "statepoint-example" {
+; DISABLED-LABEL: grow_with_stack_args:
+; DISABLED-NOT:   rog_morestack_abi
 ; CHECK-LABEL: grow_with_stack_args:
 ; SMALL:         callq rog_morestack_abi
 ; LARGE:         movq %r11, %xmm8
@@ -39,6 +42,8 @@ entry:
 ; set. Its presence is what tells the runtime "no stack arguments" without
 ; trusting toolchain provenance.
 define rogcc ptr @grow_reg_only(ptr %a0, ptr %a1) #0 gc "statepoint-example" {
+; DISABLED-LABEL: grow_reg_only:
+; DISABLED-NOT:   rog_morestack_abi
 ; CHECK-LABEL: grow_reg_only:
 ; SMALL:         callq rog_morestack_abi
 ; LARGE:         movq %r11, %xmm8
@@ -83,6 +88,9 @@ define rogcc ptr @grow_no_gc(ptr %a0, ptr %a1) #0 {
 ; The stackmap section check lives at the end of the file (after the last
 ; positive .llvm_stackmaps match): no blob may exist for this function.
 entry:
+; DISABLED-LABEL: grow_no_gc:
+; DISABLED-NOT:   rog_morestack_abi
+; DISABLED-NOT:   1073741825
   %mem = alloca [64 x i8]
   call void asm sideeffect "", "r"(ptr %mem)
   ret ptr null

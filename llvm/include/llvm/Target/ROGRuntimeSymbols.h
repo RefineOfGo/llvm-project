@@ -1,6 +1,8 @@
 #ifndef LLVM_LIB_CODEGEN_ROGRUNTIMESYMBOLS_H
 #define LLVM_LIB_CODEGEN_ROGRUNTIMESYMBOLS_H
 
+#include "llvm/Support/Compiler.h"
+
 namespace llvm {
 static const char *        kROGStackLimit           = "rog_stack_limit";
 static const char *        kROGStackCheckFn         = "rog_morestack_abi";
@@ -15,6 +17,8 @@ static const unsigned long kROGStackRedZoneSize     = 1024;
 // set_and_flags bit 30; the frontend's statepoint IDs are small sequential
 // integers, so the bit is otherwise never set.
 static const unsigned long long kROGPrologueEntryStackMapID = 1ULL << 62;
+
+LLVM_ABI bool isROGStackCheckEnabled();
 }
 
 #endif

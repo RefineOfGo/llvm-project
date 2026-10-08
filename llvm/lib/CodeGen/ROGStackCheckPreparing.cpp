@@ -3,12 +3,19 @@
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Target/ROGRuntimeSymbols.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "ROGFunctionUtils.h"
 
 using namespace llvm;
+
+static cl::opt<bool> EnableROGStackCheck(
+    "enable-rog-stack-check", cl::Hidden, cl::init(false),
+    cl::desc("Enable ROG stack-check prologue insertion"));
+
+bool llvm::isROGStackCheckEnabled() { return EnableROGStackCheck; }
 
 namespace {
 struct ROGStackCheckPreparing : public ModulePass {
@@ -43,6 +50,10 @@ bool ROGStackCheckPreparing::runOnModule(Module &mod) {
     Type *           i64 = Type::getInt64Ty(mod.getContext());
     Triple           out = Triple(mod.getTargetTriple());
     GlobalVariable * var;
+
+    if (!isROGStackCheckEnabled()) {
+        return false;
+    }
 
     /* check if any function needs stack checking */
     for (auto &fn : mod.functions()) {

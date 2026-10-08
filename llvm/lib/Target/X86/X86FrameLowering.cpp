@@ -3742,6 +3742,7 @@ void X86FrameLowering::adjustForROGPrologue(
   // When the frame size is less than the red-zone we just compare the stack
   // boundary directly to the value of the stack pointer.
   if (StackSize >= kROGStackRedZoneSize) {
+    // leaq -StackSize(%rsp), %r11
     BuildMI(checkMBB, DL, TII.get(X86::LEA64r), X86::R11)
       .addUse(X86::RSP)
       .addImm(1)
@@ -3750,48 +3751,35 @@ void X86FrameLowering::adjustForROGPrologue(
       .addReg(0);
   }
 
-  int64_t Offset;
-  unsigned SegReg;
-
   switch (STI.getTargetTriple().getOS()) {
     default: {
       report_fatal_error("ROG Stack Growing not supported on this platform.");
     }
 
-    /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
-    * one of the reserved slot within `tcbhead_t` for stack limit.
-    * Also, there is a `_Static_assert` to ensure the offset was right,
-    * so we are safe here.
-    * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
     case Triple::Linux: {
-      Offset = 0x80;
-      SegReg = X86::FS;
-      break;
-    }
-
-    /* Uses %gs segment and hard-coded slot 6 for stack limit.
-    * See: https://github.com/golang/go/issues/23617 */
-    case Triple::Darwin:
-    case Triple::MacOSX: {
-      Offset = 0x30;
-      SegReg = X86::GS;
       break;
     }
   }
 
+  // The linker keeps __rog_tls_block as the final 16 bytes of the static TLS
+  // image, so the stack_limit field at the start of that block is always
+  // reachable as %fs:-16.
+  // cmpq %fs:-16, %rsp-or-%r11
   BuildMI(checkMBB, DL, TII.get(X86::CMP64rm))
     .addUse(StackSize < kROGStackRedZoneSize ? X86::RSP : X86::R11)
     .addReg(0)
     .addImm(1)
     .addReg(0)
-    .addImm(Offset)
-    .addReg(SegReg);
+    .addImm(-16)
+    .addReg(X86::FS);
 
+  // jbe allocMBB
   BuildMI(checkMBB, DL, TII.get(X86::JCC_1))
     .addMBB(allocMBB)
     .addImm(X86::COND_BE);
 
   if (StackSize < kROGStackRedZoneSize) {
+    // leaq -StackSize(%rsp), %r11
     BuildMI(allocMBB, DL, TII.get(X86::LEA64r), X86::R11)
       .addUse(X86::RSP)
       .addImm(1)
@@ -3809,14 +3797,18 @@ void X86FrameLowering::adjustForROGPrologue(
     // needed stack pointer outside ROG's XMM0-XMM7 argument bank, materialize
     // the full target address in R11, and call through it. The runtime's large
     // entry restores R11 before entering the common morestack implementation.
+    // movq %r11, %xmm8
     BuildMI(allocMBB, DL, TII.get(X86::MOV64toPQIrr), X86::XMM8)
         .addReg(X86::R11, RegState::Kill);
+    // movabsq $rog_morestack_abi_large, %r11
     BuildMI(allocMBB, DL, TII.get(X86::MOV64ri), X86::R11)
         .addExternalSymbol(kROGStackCheckFnLarge);
+    // callq *%r11
     BuildMI(allocMBB, DL, TII.get(X86::CALL64r))
         .addReg(X86::R11, RegState::Kill)
         .addUse(X86::XMM8, RegState::ImplicitKill);
   } else {
+    // callq rog_morestack_abi
     BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
         .addUse(X86::R11, RegState::ImplicitKill)
         .addExternalSymbol(kROGStackCheckFn);

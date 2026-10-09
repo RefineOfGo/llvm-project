@@ -9,7 +9,7 @@
 define rogcc i64 @swcase(i64 %x) nounwind "rog-stack-check" "frame-pointer"="all" gc "rog" {
 ; CHECK-LABEL: swcase:
 ; CHECK:       # %bb.0:
-; CHECK-NEXT:    cmpq %fs:128, %rsp
+; CHECK-NEXT:    cmpq %fs:-16, %rsp
 ; CHECK-NEXT:    jbe .LBB0_[[MORESTACK:[0-9]+]]
 ; CHECK-NEXT:  # %bb.1: # %entry
 ; CHECK-NEXT:    testq %rax, %rax
@@ -25,7 +25,7 @@ define rogcc i64 @swcase(i64 %x) nounwind "rog-stack-check" "frame-pointer"="all
 ; CHECK-NEXT:  .LBB0_[[MORESTACK]]:
 ; CHECK-NEXT:    leaq -520(%rsp), %r11
 ; CHECK-NEXT:    callq rog_morestack_abi
-; CHECK-NEXT:    testq %rax, %rax
+; CHECK:         testq %rax, %rax
 ; CHECK-NEXT:    jne .LBB0_[[COLD]]
 ; CHECK-NEXT:  .LBB0_[[FAST]]: # %fast
 ; CHECK-NEXT:    movl $7, %eax

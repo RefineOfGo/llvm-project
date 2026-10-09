@@ -3758,13 +3758,8 @@ void X86FrameLowering::adjustForROGPrologue(
       report_fatal_error("ROG Stack Growing not supported on this platform.");
     }
 
-    /* It is non-trivial to use ELF-TLS on Linux x86_64, so steal
-    * one of the reserved slot within `tcbhead_t` for stack limit.
-    * Also, there is a `_Static_assert` to ensure the offset was right,
-    * so we are safe here.
-    * See: https://codebrowser.dev/glibc/glibc/sysdeps/x86_64/nptl/tls.h.html#85 */
     case Triple::Linux: {
-      Offset = 0x80;
+      Offset = -16;
       SegReg = X86::FS;
       break;
     }

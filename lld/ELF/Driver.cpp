@@ -31,6 +31,7 @@
 #include "LinkerScript.h"
 #include "MarkLive.h"
 #include "OutputSections.h"
+#include "ROGTLSReserve.h"
 #include "ScriptParser.h"
 #include "SymbolTable.h"
 #include "Symbols.h"
@@ -3535,6 +3536,7 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
   // Create synthesized sections such as .got and .plt. This is called before
   // processSectionCommands() so that they can be placed by SECTIONS commands.
   createSyntheticSections<ELFT>(ctx);
+  maybeAddROGTLSReserve(ctx);
 
   // Some input sections that are used for exception handling need to be moved
   // into synthetic sections. Do that now so that they aren't assigned to

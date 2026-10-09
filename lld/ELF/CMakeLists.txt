@@ -52,6 +52,7 @@ add_lld_library(lldELF
   MarkLive.cpp
   OutputSections.cpp
   Relocations.cpp
+  ROGTLSReserve.cpp
   ScriptLexer.cpp
   ScriptParser.cpp
   SymbolTable.cpp

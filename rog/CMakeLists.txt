@@ -19,9 +19,14 @@ configure_lit_site_cfg(
   "ROG_BINARY_DIR"
   )
 
+set(ROG_TEST_DEPENDS ${LLVM_TEST_DEPENDS_COMMON} llc llvm-mc llvm-readelf opt)
+if(TARGET lld)
+  list(APPEND ROG_TEST_DEPENDS lld)
+endif()
+
 add_lit_testsuite(check-rog "Running the ROG regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   EXCLUDE_FROM_CHECK_ALL
-  DEPENDS ${LLVM_TEST_DEPENDS_COMMON} llc opt
+  DEPENDS ${ROG_TEST_DEPENDS}
   )
 set_target_properties(check-rog PROPERTIES FOLDER "LLVM/Tests")

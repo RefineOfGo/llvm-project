@@ -618,6 +618,7 @@ struct InStruct {
   std::unique_ptr<RelrBaseSection> relrAuthDyn;
   std::unique_ptr<RelrBaseSection> relrDyn;
   std::unique_ptr<RelroPaddingSection> relroPadding;
+  std::unique_ptr<SyntheticSection> rogTLSReserve;
   std::unique_ptr<StringTableSection> dynStrTab;
   std::unique_ptr<SymbolTableBaseSection> dynSymTab;
   std::unique_ptr<SyntheticSection> dynamic;

@@ -16,10 +16,10 @@ from lit.llvm import llvm_config
 config.name = "rog"
 
 # testFormat: The test format to use to interpret tests.
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+config.test_format = lit.formats.ShTest(False)
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = [".ll"]
+config.suffixes = [".ll", ".s"]
 
 # excludes: A list of files/directories to exclude from the testsuite.
 config.excludes = ["CMakeLists.txt"]
@@ -34,5 +34,5 @@ config.test_exec_root = config.rog_obj_root
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 
 # Only register the tools actually used by the rog tests.
-tools = ["opt", "FileCheck"]
+tools = ["ld.lld", "llvm-mc", "llvm-readelf", "opt", "FileCheck"]
 llvm_config.add_tool_substitutions(tools, config.llvm_tools_dir)

@@ -9,8 +9,8 @@
 #include "ROGTLSReserve.h"
 #include "Config.h"
 #include "InputSection.h"
-#include "SymbolTable.h"
-#include "Symbols.h"
+#include "OutputSections.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
 
 using namespace llvm;
@@ -19,8 +19,12 @@ using namespace lld;
 using namespace lld::elf;
 
 namespace {
-constexpr StringRef rogTLSReserveMarker = "__rog_lld_tls_reserve";
-constexpr size_t rogTLSReserveSize = 32;
+constexpr size_t rogTLSReserveSize = 16;
+
+bool shouldReserveROGTLS(Ctx &ctx) {
+  return !ctx.arg.relocatable && ctx.arg.emachine == EM_X86_64 &&
+         ctx.arg.ekind == ELF64LEKind && ctx.arg.osabi == ELFOSABI_NONE;
+}
 
 class ROGTLSReserveSection final : public SyntheticSection {
 public:
@@ -36,14 +40,36 @@ public:
 } // namespace
 
 void elf::maybeAddROGTLSReserve(Ctx &ctx) {
-  if (ctx.arg.relocatable || ctx.arg.emachine != EM_X86_64 ||
-      ctx.arg.ekind != ELF64LEKind || ctx.arg.osabi != ELFOSABI_NONE)
-    return;
-
-  Symbol *marker = ctx.symtab->find(rogTLSReserveMarker);
-  if (!marker || !marker->isDefined())
+  if (!shouldReserveROGTLS(ctx))
     return;
 
   ctx.in.rogTLSReserve = std::make_unique<ROGTLSReserveSection>(ctx);
   ctx.inputSections.push_back(ctx.in.rogTLSReserve.get());
+}
+
+void elf::placeROGTLSReserveAtEnd(Ctx &ctx) {
+  InputSection *reserve = ctx.in.rogTLSReserve.get();
+  if (!reserve)
+    return;
+
+  auto *out = dyn_cast_or_null<OutputSection>(reserve->parent);
+  if (!out)
+    return;
+
+  InputSectionDescription *lastISD = nullptr;
+  bool found = false;
+  for (SectionCommand *cmd : out->commands) {
+    auto *isd = dyn_cast<InputSectionDescription>(cmd);
+    if (!isd)
+      continue;
+    lastISD = isd;
+    llvm::erase_if(isd->sections, [&](InputSection *isec) {
+      if (isec != reserve)
+        return false;
+      found = true;
+      return true;
+    });
+  }
+  if (found && lastISD)
+    lastISD->sections.push_back(reserve);
 }

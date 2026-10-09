@@ -13,6 +13,7 @@ namespace lld::elf {
 struct Ctx;
 
 void maybeAddROGTLSReserve(Ctx &ctx);
+void placeROGTLSReserveAtEnd(Ctx &ctx);
 } // namespace lld::elf
 
 #endif

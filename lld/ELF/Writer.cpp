@@ -16,6 +16,7 @@
 #include "LinkerScript.h"
 #include "MapFile.h"
 #include "OutputSections.h"
+#include "ROGTLSReserve.h"
 #include "Relocations.h"
 #include "SymbolTable.h"
 #include "Symbols.h"
@@ -1975,6 +1976,7 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
   ctx.script->diagnoseMissingSGSectionAddress();
 
   sortSections();
+  placeROGTLSReserveAtEnd(ctx);
 
   // Create a list of OutputSections, assign sectionIndex, and populate
   // ctx.in.shStrTab. If -z nosectionheader is specified, drop non-ALLOC

@@ -22,8 +22,9 @@ namespace {
 constexpr size_t rogTLSReserveSize = 16;
 
 bool shouldReserveROGTLS(Ctx &ctx) {
-  return !ctx.arg.relocatable && ctx.arg.emachine == EM_X86_64 &&
-         ctx.arg.ekind == ELF64LEKind && ctx.arg.osabi == ELFOSABI_NONE;
+  return !ctx.arg.shared && !ctx.arg.relocatable &&
+         ctx.arg.emachine == EM_X86_64 && ctx.arg.ekind == ELF64LEKind &&
+         ctx.arg.osabi == ELFOSABI_NONE;
 }
 
 class ROGTLSReserveSection final : public SyntheticSection {

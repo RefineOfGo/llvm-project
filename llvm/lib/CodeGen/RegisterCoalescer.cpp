@@ -74,6 +74,8 @@ STATISTIC(NumInflated, "Number of register classes inflated");
 STATISTIC(NumLaneConflicts, "Number of dead lane conflicts tested");
 STATISTIC(NumLaneResolves, "Number of dead lane conflicts resolved");
 STATISTIC(NumShrinkToUses, "Number of shrinkToUses called");
+STATISTIC(NumTerminalRuleSrcUses,
+          "Number of source instructions examined by the terminal rule");
 
 static cl::opt<bool> EnableJoining("join-liveintervals",
                                    cl::desc("Coalesce copies (default=true)"),
@@ -174,6 +176,14 @@ class RegisterCoalescer : private LiveRangeEdit::Delegate {
   /// Copy instructions yet to be coalesced.
   SmallVector<MachineInstr *, 8> WorkList;
   SmallVector<MachineInstr *, 8> LocalWorkList;
+
+  // Only valid while collecting copies in one block, before coalescing can
+  // change register affinities or live intervals.
+  struct TerminalRuleInfo {
+    DenseMap<Register, bool> TerminalRegs;
+    using Affinity = std::pair<const MachineInstr *, const LiveInterval *>;
+    DenseMap<Register, SmallVector<Affinity, 2>> NonTerminalAffinities;
+  };
 
   /// Set of instruction pointers that have been erased, and
   /// that may be present in WorkList.
@@ -337,7 +347,7 @@ class RegisterCoalescer : private LiveRangeEdit::Delegate {
   /// In that case, Dst2 and Dst will not be able to be both coalesced
   /// with Src. Since Dst2 exposes more coalescing opportunities than
   /// Dst, we can drop \p Copy.
-  bool applyTerminalRule(const MachineInstr &Copy) const;
+  bool applyTerminalRule(const MachineInstr &Copy, TerminalRuleInfo &Info) const;
 
   /// Wrapper method for \see LiveIntervals::shrinkToUses.
   /// This method does the proper fixing of the live-ranges when the afore
@@ -4123,7 +4133,8 @@ static bool isTerminalReg(Register DstReg, const MachineInstr &Copy,
   return true;
 }
 
-bool RegisterCoalescer::applyTerminalRule(const MachineInstr &Copy) const {
+bool RegisterCoalescer::applyTerminalRule(const MachineInstr &Copy,
+                                        TerminalRuleInfo &Info) const {
   assert(Copy.isCopyLike());
   if (!UseTerminalRule)
     return false;
@@ -4131,39 +4142,66 @@ bool RegisterCoalescer::applyTerminalRule(const MachineInstr &Copy) const {
   unsigned SrcSubReg = 0, DstSubReg = 0;
   if (!isMoveInstr(*TRI, &Copy, SrcReg, DstReg, SrcSubReg, DstSubReg))
     return false;
+  auto IsTerminal = [&](Register Reg, const MachineInstr &Affinity) {
+    auto [It, Inserted] = Info.TerminalRegs.try_emplace(Reg, false);
+    // Affinity is already known to involve Reg. Terminality therefore means
+    // Reg occurs in exactly one distinct copy-like instruction, independently
+    // of which such instruction led us here.
+    if (Inserted)
+      It->second = isTerminalReg(Reg, Affinity, MRI);
+    return It->second;
+  };
   // Check if the destination of this copy has any other affinity.
   if (DstReg.isPhysical() ||
       // If SrcReg is a physical register, the copy won't be coalesced.
       // Ignoring it may have other side effect (like missing
       // rematerialization). So keep it.
-      SrcReg.isPhysical() || !isTerminalReg(DstReg, Copy, MRI))
+      SrcReg.isPhysical() || !IsTerminal(DstReg, Copy))
     return false;
 
   // DstReg is a terminal node. Check if it interferes with any other
   // copy involving SrcReg.
   const MachineBasicBlock *OrigBB = Copy.getParent();
   const LiveInterval &DstLI = LIS->getInterval(DstReg);
-  for (const MachineInstr &MI : MRI->reg_nodbg_instructions(SrcReg)) {
-    // Technically we should check if the weight of the new copy is
-    // interesting compared to the other one and update the weight
-    // of the copies accordingly. However, this would only work if
-    // we would gather all the copies first then coalesce, whereas
-    // right now we interleave both actions.
-    // For now, just consider the copies that are in the same block.
-    if (&MI == &Copy || !MI.isCopyLike() || MI.getParent() != OrigBB)
+  auto [It, Inserted] = Info.NonTerminalAffinities.try_emplace(SrcReg);
+  if (Inserted) {
+    // All queries in this collection phase see the same use lists and live
+    // intervals. Build the relevant affinities once rather than scanning a
+    // high-fanout source's entire use list for every terminal destination.
+    for (const MachineInstr &MI : MRI->reg_nodbg_instructions(SrcReg)) {
+      ++NumTerminalRuleSrcUses;
+      // Technically we should check if the weight of the new copy is
+      // interesting compared to the other one and update the weight
+      // of the copies accordingly. However, this would only work if
+      // we would gather all the copies first then coalesce, whereas
+      // right now we interleave both actions.
+      // For now, just consider the copies that are in the same block.
+      if (!MI.isCopyLike() || MI.getParent() != OrigBB)
+        continue;
+      Register OtherSrcReg, OtherReg;
+      unsigned OtherSrcSubReg = 0, OtherSubReg = 0;
+      if (!isMoveInstr(*TRI, &MI, OtherSrcReg, OtherReg, OtherSrcSubReg,
+                       OtherSubReg)) {
+        // Preserve traversal order: an earlier interfering affinity can still
+        // make the rule apply before this unrecognized copy would reject it.
+        It->second.emplace_back(&MI, nullptr);
+        break;
+      }
+      if (OtherReg == SrcReg)
+        OtherReg = OtherSrcReg;
+      // Check if OtherReg is a non-terminal.
+      if (OtherReg.isPhysical() || IsTerminal(OtherReg, MI))
+        continue;
+      It->second.emplace_back(&MI, &LIS->getInterval(OtherReg));
+    }
+  }
+  for (auto [OtherCopy, OtherLI] : It->second) {
+    if (OtherCopy == &Copy)
       continue;
-    Register OtherSrcReg, OtherReg;
-    unsigned OtherSrcSubReg = 0, OtherSubReg = 0;
-    if (!isMoveInstr(*TRI, &MI, OtherSrcReg, OtherReg, OtherSrcSubReg,
-                     OtherSubReg))
+    if (!OtherLI)
       return false;
-    if (OtherReg == SrcReg)
-      OtherReg = OtherSrcReg;
-    // Check if OtherReg is a non-terminal.
-    if (OtherReg.isPhysical() || isTerminalReg(OtherReg, MI, MRI))
-      continue;
     // Check that OtherReg interfere with DstReg.
-    if (LIS->getInterval(OtherReg).overlaps(DstLI)) {
+    if (OtherLI->overlaps(DstLI)) {
       LLVM_DEBUG(dbgs() << "Apply terminal rule for: " << printReg(DstReg)
                         << '\n');
       return true;
@@ -4179,6 +4217,7 @@ void RegisterCoalescer::copyCoalesceInMBB(MachineBasicBlock *MBB) {
   // yet, it might invalidate the iterator.
   const unsigned PrevSize = WorkList.size();
   if (JoinGlobalCopies) {
+    TerminalRuleInfo Info;
     SmallVector<MachineInstr *, 2> LocalTerminals;
     SmallVector<MachineInstr *, 2> GlobalTerminals;
     // Coalesce copies top-down to propagate coalescing and rematerialization
@@ -4186,7 +4225,7 @@ void RegisterCoalescer::copyCoalesceInMBB(MachineBasicBlock *MBB) {
     for (MachineInstr &MI : *MBB) {
       if (!MI.isCopyLike())
         continue;
-      bool ApplyTerminalRule = applyTerminalRule(MI);
+      bool ApplyTerminalRule = applyTerminalRule(MI, Info);
       if (isLocalCopy(&MI, LIS)) {
         if (ApplyTerminalRule)
           LocalTerminals.push_back(&MI);
@@ -4203,12 +4242,13 @@ void RegisterCoalescer::copyCoalesceInMBB(MachineBasicBlock *MBB) {
     LocalWorkList.append(LocalTerminals.begin(), LocalTerminals.end());
     WorkList.append(GlobalTerminals.begin(), GlobalTerminals.end());
   } else {
+    TerminalRuleInfo Info;
     SmallVector<MachineInstr *, 2> Terminals;
     // Coalesce copies top-down to propagate coalescing and rematerialization
     // forward.
     for (MachineInstr &MII : *MBB)
       if (MII.isCopyLike()) {
-        if (applyTerminalRule(MII))
+        if (applyTerminalRule(MII, Info))
           Terminals.push_back(&MII);
         else
           WorkList.push_back(&MII);

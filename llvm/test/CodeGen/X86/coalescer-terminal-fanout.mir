@@ -1,0 +1,38 @@
+# REQUIRES: asserts
+# RUN: llc -mtriple=x86_64 -run-pass=register-coalescer -verify-machineinstrs -terminal-rule=1 -join-globalcopies=0 %s -o - | FileCheck %s
+# RUN: llc -mtriple=x86_64 -run-pass=register-coalescer -verify-machineinstrs -terminal-rule=1 -join-globalcopies=1 %s -o - | FileCheck %s
+# RUN: llc -mtriple=x86_64 -run-pass=register-coalescer -terminal-rule=1 -join-globalcopies=0 -stats -stats-json %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=STATS
+# RUN: llc -mtriple=x86_64 -run-pass=register-coalescer -terminal-rule=1 -join-globalcopies=1 -stats -stats-json %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=STATS
+
+# Every destination has one copy affinity and a non-copy use. The shared source
+# has five instructions, including its definition; examine that chain once for
+# all four queries, while preserving the ordinary coalescing result.
+# STATS: "regalloc.NumTerminalRuleSrcUses": 5{{,?$}}
+# CHECK-LABEL: name: fanout
+# CHECK: %[[BASE:[0-9]+]]:gr64 = COPY $rdi
+# CHECK-NEXT: MOV64mi32 %[[BASE]], 1, $noreg, 0, $noreg, 7
+# CHECK-NEXT: MOV64mi32 %[[BASE]], 1, $noreg, 0, $noreg, 7
+# CHECK-NEXT: MOV64mi32 %[[BASE]], 1, $noreg, 0, $noreg, 7
+# CHECK-NEXT: MOV64mi32 %[[BASE]], 1, $noreg, 0, $noreg, 7
+# CHECK-NEXT: RET 0
+
+--- |
+  define void @fanout(ptr %p) { ret void }
+...
+---
+name: fanout
+tracksRegLiveness: true
+body: |
+  bb.0:
+    liveins: $rdi
+    %0:gr64 = COPY $rdi
+    %1:gr64 = COPY %0
+    MOV64mi32 %1, 1, $noreg, 0, $noreg, 7
+    %2:gr64 = COPY %0
+    MOV64mi32 %2, 1, $noreg, 0, $noreg, 7
+    %3:gr64 = COPY %0
+    MOV64mi32 %3, 1, $noreg, 0, $noreg, 7
+    %4:gr64 = COPY %0
+    MOV64mi32 %4, 1, $noreg, 0, $noreg, 7
+    RET 0
+...

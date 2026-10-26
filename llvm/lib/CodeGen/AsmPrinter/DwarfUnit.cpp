@@ -16,6 +16,7 @@
 #include "DwarfExpression.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -1756,12 +1757,33 @@ static bool hasVectorBeenPadded(const DICompositeType *CTy) {
   return ActualSize != (NumVecElements * ElementSize);
 }
 
+// A zero size can describe either an empty array or an array whose size is
+// unknown. Require constant bounds as well as an explicit constant size.
+static bool hasFixedArraySize(const DICompositeType *CTy) {
+  if (CTy->isForwardDecl() ||
+      !mdconst::dyn_extract_or_null<ConstantInt>(CTy->getRawSizeInBits()) ||
+      CTy->getElements().empty())
+    return false;
+  return llvm::all_of(CTy->getElements(), [](DINode *Element) {
+    auto *Subrange = dyn_cast_or_null<DISubrange>(Element);
+    auto *Count = Subrange
+                      ? dyn_cast_if_present<ConstantInt *>(Subrange->getCount())
+                      : nullptr;
+    return Count && !Count->isNegative();
+  });
+}
+
 void DwarfUnit::constructArrayTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
   if (CTy->isVector()) {
     addFlag(Buffer, dwarf::DW_AT_GNU_vector);
     if (hasVectorBeenPadded(CTy))
       addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt,
               CTy->getSizeInBits() / CHAR_BIT);
+  } else if (getSourceLanguage() == dwarf::DW_LANG_Go && hasFixedArraySize(CTy)) {
+    // Delve uses the total array size to compute the element stride, including
+    // for arrays with zero-sized elements.
+    addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt,
+            CTy->getSizeInBits() / CHAR_BIT);
   }
 
   if (DIVariable *Var = CTy->getDataLocation()) {

@@ -1482,6 +1482,49 @@ TEST(DIBuilder, CompositeTypeAnnotations) {
   EXPECT_EQ(NoAnnotUnion->getAnnotations().get(), nullptr);
 }
 
+TEST(DIBuilder, ReplaceRecursiveTypeAnnotations) {
+  LLVMContext Ctx;
+  Module M("MyModule", Ctx);
+  DIBuilder DIB(M);
+  DIFile *F = DIB.createFile("main.go", "/");
+  DICompileUnit *CU = DIB.createCompileUnit(
+      DISourceLanguageName(dwarf::DW_LANG_Go), F, "Test", false, "", 0);
+  DICompositeType *Slice = DIB.createStructType(
+      CU, "[]Node", F, 0, 192, 64, {}, {}, {}, 0, {}, "[]Node");
+  ASSERT_TRUE(Slice->isResolved());
+
+  // Construct Node { Next *Node } without registering it with the builder.
+  // Attaching its annotation must track this unresolved cycle even though the
+  // slice stub is already resolved.
+  auto TemporaryMembers = MDTuple::getTemporary(Ctx, {});
+  auto *Node = DICompositeType::get(
+      Ctx, dwarf::DW_TAG_structure_type, "Node", F, 0, nullptr, nullptr,
+      uint64_t(64), 64, 0, DINode::FlagZero, TemporaryMembers.get(), 0,
+      std::nullopt, nullptr);
+  auto *Pointer = DIDerivedType::get(
+      Ctx, dwarf::DW_TAG_pointer_type, "", nullptr, 0, nullptr, Node,
+      uint64_t(64), 64, 0, std::nullopt, std::nullopt, DINode::FlagZero);
+  auto *Next = DIDerivedType::get(
+      Ctx, dwarf::DW_TAG_member, "Next", F, 0, Node, Pointer, uint64_t(64), 64,
+      0, std::nullopt, std::nullopt, DINode::FlagZero);
+  TemporaryMembers->replaceAllUsesWith(MDTuple::get(Ctx, {Next}));
+  TemporaryMembers.reset();
+  ASSERT_FALSE(Node->isResolved());
+
+  auto *Element = MDTuple::get(Ctx, {MDString::get(Ctx, "go_elem"), Node});
+  DINodeArray Annotations = DIB.getOrCreateArray({Element});
+  DIB.replaceAnnotations(Slice, Annotations);
+  EXPECT_FALSE(Annotations.get()->isResolved());
+
+  DIB.finalize();
+  EXPECT_TRUE(Annotations.get()->isResolved());
+  EXPECT_TRUE(Node->isResolved());
+  EXPECT_TRUE(Next->isResolved());
+  EXPECT_TRUE(Pointer->isResolved());
+  EXPECT_EQ(Slice->getAnnotations().get(), Annotations.get());
+  EXPECT_EQ(Element->getOperand(1).get(), Node);
+}
+
 TEST(DIBuilder, DynamicOffsetAndSize) {
   LLVMContext Ctx;
   auto M = std::make_unique<Module>("MyModule", Ctx);

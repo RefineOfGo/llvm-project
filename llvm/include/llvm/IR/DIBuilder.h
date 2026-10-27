@@ -1245,6 +1245,11 @@ namespace llvm {
     LLVM_ABI void replaceArrays(DICompositeType *&T, DINodeArray Elements,
                                 DINodeArray TParams = DINodeArray());
 
+    /// Replace annotations on a composite type, tracking unresolved cycles
+    /// even when the type itself is already resolved.
+    LLVM_ABI void replaceAnnotations(DICompositeType *&T,
+                                    DINodeArray Annotations);
+
     /// Replace a temporary node.
     ///
     /// Call \a MDNode::replaceAllUsesWith() on \c N, replacing it with \c

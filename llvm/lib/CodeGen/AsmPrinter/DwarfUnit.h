@@ -273,6 +273,9 @@ public:
   /// Find existing DIE or create new DIE for the given type.
   virtual DIE *getOrCreateTypeDIE(const MDNode *TyNode);
 
+  /// Resolve an absolute runtime layout symbol supplied by a Go annotation.
+  const MCSymbol *getGoLayoutSymbol(DINodeArray Annotations, StringRef Key);
+
   /// Get context owner's DIE.
   virtual DIE *getOrCreateContextDIE(const DIScope *Context);
 

@@ -989,6 +989,26 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DISubroutineType *CTy) {
     addFlag(Buffer, dwarf::DW_AT_rvalue_reference);
 }
 
+const MCSymbol *DwarfUnit::getGoLayoutSymbol(DINodeArray Annotations,
+                                            StringRef Key) {
+  if (getSourceLanguage() != dwarf::DW_LANG_Go || !Annotations)
+    return nullptr;
+  for (const Metadata *Annotation : Annotations->operands()) {
+    const auto *MD = cast<MDNode>(Annotation);
+    if (cast<MDString>(MD->getOperand(0))->getString() != Key)
+      continue;
+    auto *Symbol = MD->getNumOperands() == 2
+                       ? dyn_cast_or_null<MDString>(MD->getOperand(1))
+                       : nullptr;
+    if (!Symbol || Symbol->getString().empty())
+      report_fatal_error("Go layout annotation requires an absolute symbol name");
+    if (DD->getDwarfVersion() < 4)
+      report_fatal_error("Go layout symbols require DWARF 4 or later");
+    return Asm->OutContext.getOrCreateSymbol(Symbol->getString());
+  }
+  return nullptr;
+}
+
 void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations,
                               bool IsGoType) {
   if (!Annotations)
@@ -998,6 +1018,13 @@ void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations,
     const MDNode *MD = cast<MDNode>(Annotation);
     const MDString *Name = cast<MDString>(MD->getOperand(0));
     StringRef Key = Name->getString();
+    // Layout annotations are emitted in place of the ordinary size/offset.
+    if (getSourceLanguage() == dwarf::DW_LANG_Go &&
+        ((Buffer.getTag() == dwarf::DW_TAG_structure_type &&
+          Key == "go_byte_size_symbol") ||
+         (Buffer.getTag() == dwarf::DW_TAG_member &&
+          Key == "go_member_offset_symbol")))
+      continue;
     if (IsGoType &&
         (Key == "go_kind" || Key == "go_key" || Key == "go_elem")) {
       if (MD->getNumOperands() != 2)
@@ -1241,7 +1268,12 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
   if (Tag == dwarf::DW_TAG_enumeration_type ||
       Tag == dwarf::DW_TAG_class_type || Tag == dwarf::DW_TAG_structure_type ||
       Tag == dwarf::DW_TAG_union_type) {
-    if (auto *Var = dyn_cast_or_null<DIVariable>(CTy->getRawSizeInBits())) {
+    if (const MCSymbol *Symbol =
+            Tag == dwarf::DW_TAG_structure_type
+                ? getGoLayoutSymbol(CTy->getAnnotations(), "go_byte_size_symbol")
+                : nullptr) {
+      addLabel(Buffer, dwarf::DW_AT_byte_size, dwarf::DW_FORM_data8, Symbol);
+    } else if (auto *Var = dyn_cast_or_null<DIVariable>(CTy->getRawSizeInBits())) {
       if (auto *VarDIE = getDIE(Var))
         addDIEEntry(Buffer, dwarf::DW_AT_bit_size, *VarDIE);
     } else if (auto *Exp =
@@ -1920,7 +1952,15 @@ DIE &DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
 
   addSourceLine(MemberDie, DT);
 
-  if (DT->getTag() == dwarf::DW_TAG_inheritance && DT->isVirtual()) {
+  if (const MCSymbol *Symbol =
+          DT->getTag() == dwarf::DW_TAG_member
+              ? getGoLayoutSymbol(DT->getAnnotations(), "go_member_offset_symbol")
+              : nullptr) {
+    if (DT->isBitField())
+      report_fatal_error("Go layout symbols do not describe bitfields");
+    addLabel(MemberDie, dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data8,
+             Symbol);
+  } else if (DT->getTag() == dwarf::DW_TAG_inheritance && DT->isVirtual()) {
 
     // For C++, virtual base classes are not at fixed offset. Use following
     // expression to extract appropriate offset from vtable.

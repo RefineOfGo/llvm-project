@@ -1334,3 +1334,15 @@ void DIBuilder::replaceArrays(DICompositeType *&T, DINodeArray Elements,
   if (TParams)
     trackIfUnresolved(TParams.get());
 }
+
+void DIBuilder::replaceAnnotations(DICompositeType *&T,
+                                   DINodeArray Annotations) {
+  TypedTrackingMDRef<DICompositeType> N(T);
+  N->replaceAnnotations(Annotations);
+  T = N.get();
+
+  // A resolved type can orphan unresolved annotation cycles, just as with
+  // replaceArrays. Track the new operand so finalize resolves those cycles.
+  if (T->isResolved() && Annotations)
+    trackIfUnresolved(Annotations.get());
+}

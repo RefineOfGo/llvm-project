@@ -1965,6 +1965,10 @@ public:
   void replaceTemplateParams(DITemplateParameterArray TemplateParams) {
     replaceOperandWith(MY_FIRST_OPERAND + 3, TemplateParams.get());
   }
+
+  void replaceAnnotations(DINodeArray Annotations) {
+    replaceOperandWith(MY_FIRST_OPERAND + 10, Annotations.get());
+  }
   /// @}
 
   static bool classof(const Metadata *MD) {

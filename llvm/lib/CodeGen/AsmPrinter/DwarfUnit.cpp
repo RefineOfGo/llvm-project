@@ -28,6 +28,7 @@
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include <cassert>
 #include <cstdint>
@@ -986,13 +987,33 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DISubroutineType *CTy) {
     addFlag(Buffer, dwarf::DW_AT_rvalue_reference);
 }
 
-void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations) {
+void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations,
+                              bool IsGoType) {
   if (!Annotations)
     return;
 
   for (const Metadata *Annotation : Annotations->operands()) {
     const MDNode *MD = cast<MDNode>(Annotation);
     const MDString *Name = cast<MDString>(MD->getOperand(0));
+    StringRef Key = Name->getString();
+    if (IsGoType && (Key == "go_kind" || Key == "go_elem")) {
+      if (MD->getNumOperands() != 2)
+        report_fatal_error("Go type annotations require a name and value");
+      Metadata *Value = MD->getOperand(1);
+      if (Key == "go_kind") {
+        auto *Kind = mdconst::dyn_extract_or_null<ConstantInt>(Value);
+        if (!Kind || !Kind->getValue().isIntN(8))
+          report_fatal_error("go_kind annotation must be an unsigned byte");
+        addUInt(Buffer, dwarf::DW_AT_GO_kind, dwarf::DW_FORM_data1,
+                Kind->getZExtValue());
+      } else {
+        auto *Element = dyn_cast_or_null<DIType>(Value);
+        if (!Element)
+          report_fatal_error("go_elem annotation must reference a DIType");
+        addType(Buffer, Element, dwarf::DW_AT_GO_elem);
+      }
+      continue;
+    }
     const auto &Value = MD->getOperand(1);
 
     DIE &AnnotationDie = createAndAddDIE(dwarf::DW_TAG_LLVM_annotation, Buffer);
@@ -1208,7 +1229,8 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
   if (CTy->getRuntimeLang() == dwarf::DW_LANG_Swift && CTy->getRawIdentifier())
     addString(Buffer, dwarf::DW_AT_linkage_name, CTy->getIdentifier());
 
-  addAnnotation(Buffer, CTy->getAnnotations());
+  addAnnotation(Buffer, CTy->getAnnotations(),
+                getSourceLanguage() == dwarf::DW_LANG_Go);
 
   if (Tag == dwarf::DW_TAG_enumeration_type ||
       Tag == dwarf::DW_TAG_class_type || Tag == dwarf::DW_TAG_structure_type ||

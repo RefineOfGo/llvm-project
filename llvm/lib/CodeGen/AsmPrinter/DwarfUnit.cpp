@@ -878,7 +878,9 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIDerivedType *DTy) {
   if (!Name.empty())
     addString(Buffer, dwarf::DW_AT_name, Name);
 
-  addAnnotation(Buffer, DTy->getAnnotations());
+  addAnnotation(Buffer, DTy->getAnnotations(),
+                Tag == dwarf::DW_TAG_typedef &&
+                    getSourceLanguage() == dwarf::DW_LANG_Go);
 
   // If alignment is specified for a typedef , create and insert DW_AT_alignment
   // attribute in DW_TAG_typedef DIE.
@@ -996,7 +998,8 @@ void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations,
     const MDNode *MD = cast<MDNode>(Annotation);
     const MDString *Name = cast<MDString>(MD->getOperand(0));
     StringRef Key = Name->getString();
-    if (IsGoType && (Key == "go_kind" || Key == "go_elem")) {
+    if (IsGoType &&
+        (Key == "go_kind" || Key == "go_key" || Key == "go_elem")) {
       if (MD->getNumOperands() != 2)
         report_fatal_error("Go type annotations require a name and value");
       Metadata *Value = MD->getOperand(1);
@@ -1007,10 +1010,13 @@ void DwarfUnit::addAnnotation(DIE &Buffer, DINodeArray Annotations,
         addUInt(Buffer, dwarf::DW_AT_GO_kind, dwarf::DW_FORM_data1,
                 Kind->getZExtValue());
       } else {
-        auto *Element = dyn_cast_or_null<DIType>(Value);
-        if (!Element)
-          report_fatal_error("go_elem annotation must reference a DIType");
-        addType(Buffer, Element, dwarf::DW_AT_GO_elem);
+        auto *ReferencedType = dyn_cast_or_null<DIType>(Value);
+        if (!ReferencedType)
+          report_fatal_error(Key == "go_key"
+                                 ? "go_key annotation must reference a DIType"
+                                 : "go_elem annotation must reference a DIType");
+        addType(Buffer, ReferencedType,
+                Key == "go_key" ? dwarf::DW_AT_GO_key : dwarf::DW_AT_GO_elem);
       }
       continue;
     }

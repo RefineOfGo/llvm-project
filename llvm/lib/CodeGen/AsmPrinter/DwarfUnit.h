@@ -325,7 +325,7 @@ public:
   void addSectionLabel(DIE &Die, dwarf::Attribute Attribute,
                        const MCSymbol *Label, const MCSymbol *Sec);
 
-  /// Add annotations, including Go attributes on Go composite types.
+  /// Add annotations, including Go attributes on Go composite types and typedefs.
   void addAnnotation(DIE &Buffer, DINodeArray Annotations,
                      bool IsGoType = false);
 

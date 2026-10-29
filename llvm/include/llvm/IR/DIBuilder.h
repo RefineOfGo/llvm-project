@@ -945,6 +945,12 @@ namespace llvm {
                        DINode::DIFlags Flags = DINode::FlagZero,
                        uint32_t AlignInBits = 0);
 
+    /// Create an auto variable with annotations, retaining it like other locals.
+    LLVM_ABI DILocalVariable *createAutoVariable(
+        DIScope *Scope, StringRef Name, DIFile *File, unsigned LineNo, DIType *Ty,
+        bool AlwaysPreserve, DINode::DIFlags Flags, uint32_t AlignInBits,
+        DINodeArray Annotations);
+
     /// Create a new descriptor for an label.
     ///
     /// \c Scope must be a \a DILocalScope, and thus its scope chain eventually

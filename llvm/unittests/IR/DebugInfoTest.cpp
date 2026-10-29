@@ -388,6 +388,34 @@ TEST(DIBuilder, CreateFile) {
   EXPECT_EQ(Source, F->getSource());
 }
 
+TEST(DIBuilder, RetainAnnotatedAutoVariables) {
+  LLVMContext Ctx;
+  Module M("MyModule", Ctx);
+  DIBuilder DIB(M);
+  DIFile *F = DIB.createFile("main.go", "/");
+  DIB.createCompileUnit(DISourceLanguageName(dwarf::DW_LANG_Go), F, "Test",
+                        false, "", 0);
+  auto *SP = DIB.createFunction(F, "f", "f", F, 1,
+                                DIB.createSubroutineType({}), 1,
+                                DINode::FlagZero, DISubprogram::SPFlagDefinition);
+  auto *Ty = DIB.createBasicType("int", 64, dwarf::DW_ATE_signed);
+  auto *Annotation = MDTuple::get(
+      Ctx, {MDString::get(Ctx, "result"), MDString::get(Ctx, "1")});
+  auto *Annotations = MDTuple::get(Ctx, {Annotation});
+  auto *First = DIB.createAutoVariable(SP, "first", F, 1, Ty, true,
+                                       DINode::FlagZero, 64, Annotations);
+  auto *Second = DIB.createAutoVariable(SP, "second", F, 1, Ty, true,
+                                        DINode::FlagZero, 64, Annotations);
+  DIB.finalize();
+
+  EXPECT_EQ(2u, SP->getRetainedNodes().size());
+  for (auto *Var : {First, Second}) {
+    EXPECT_EQ(0u, Var->getArg());
+    EXPECT_EQ(Annotations, Var->getAnnotations().get());
+    EXPECT_TRUE(llvm::is_contained(SP->getRetainedNodes(), Var));
+  }
+}
+
 TEST(DIBuilder, CreateFortranArrayTypeWithAttributes) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M(new Module("MyModule", Ctx));

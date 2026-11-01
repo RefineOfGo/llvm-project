@@ -673,6 +673,13 @@ bool ImplicitNullChecks::analyzeBlockForNullChecks(
   SmallVector<MachineInstr *, 8> InstsSeenSoFar;
 
   for (auto &MI : *NotNullSucc) {
+    // Pseudo probes describe the original control-flow location, but have no
+    // execution semantics. Keep them in the successor block so samples still
+    // distinguish the non-null path, while allowing the faulting memory
+    // operation behind them to form an implicit null check.
+    if (MI.isPseudoProbe())
+      continue;
+
     if (!canHandle(&MI) || InstsSeenSoFar.size() >= MaxInstsToConsider)
       return false;
 

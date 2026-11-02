@@ -1625,6 +1625,7 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
                     [](MachineOperand &Operand) { return Operand.isFI(); }))
     return MBB;
 
+  const unsigned OldInstrNum = MI->peekDebugInstrNum();
   MachineInstrBuilder MIB = BuildMI(MF, MI->getDebugLoc(), MI->getDesc());
 
   // Inherit previous memory operands.
@@ -1640,6 +1641,12 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
       unsigned TiedTo = i;
       if (MO.isReg() && MO.isTied())
         TiedTo = MI->findTiedOperandIdx(i);
+      // Expanding frame indices shifts trailing implicit defs, including call
+      // return registers. Preserve instruction references to their new indices.
+      if (OldInstrNum && MO.isReg() && MO.isDef())
+        MF.makeDebugValueSubstitution(
+            {OldInstrNum, i},
+            {MIB->getDebugInstrNum(MF), MIB->getNumOperands()});
       MIB.add(MO);
       if (TiedTo < i)
         MIB->tieOperands(TiedTo, MIB->getNumOperands() - 1);

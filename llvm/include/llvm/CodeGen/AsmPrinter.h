@@ -845,6 +845,10 @@ public:
   /// Emit frame instruction to describe the layout of the frame.
   void emitCFIInstruction(const MCCFIInstruction &Inst) const;
 
+  /// Registers whose entry values ROG functions preserve, in DWARF numbering.
+  /// An empty list is returned for other calling conventions.
+  SmallVector<unsigned, 16> getROGCalleeSavedDwarfRegs() const;
+
   /// Emit Dwarf abbreviation table.
   template <typename T> void emitDwarfAbbrevs(const T &Abbrevs) const {
     // For each abbreviation.

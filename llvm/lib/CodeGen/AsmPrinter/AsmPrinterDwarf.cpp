@@ -10,11 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/DIE.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCSection.h"
@@ -202,6 +206,24 @@ void AsmPrinter::emitCallSiteValue(uint64_t Value, unsigned Encoding) const {
 // Dwarf Lowering Routines
 //===----------------------------------------------------------------------===//
 
+SmallVector<unsigned, 16> AsmPrinter::getROGCalleeSavedDwarfRegs() const {
+  SmallVector<unsigned, 16> Regs;
+  CallingConv::ID CC = MF->getFunction().getCallingConv();
+  if (CC != CallingConv::ROG && CC != CallingConv::ROG_Cold)
+    return Regs;
+
+  const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
+  // Call lowering can exclude argument and return registers from the ABI's
+  // initial list. Use the final list that also drives prologue emission.
+  for (const MCPhysReg *Reg = MF->getRegInfo().getCalleeSavedRegs(); *Reg;
+       ++Reg) {
+    int DwarfReg = TRI->getDwarfRegNum(*Reg, true);
+    if (DwarfReg >= 0 && !is_contained(Regs, unsigned(DwarfReg)))
+      Regs.push_back(DwarfReg);
+  }
+  return Regs;
+}
+
 void AsmPrinter::emitCFIInstruction(const MCCFIInstruction &Inst) const {
   SMLoc Loc = Inst.getLoc();
   switch (Inst.getOperation()) {
@@ -249,7 +271,13 @@ void AsmPrinter::emitCFIInstruction(const MCCFIInstruction &Inst) const {
     OutStreamer->emitCFIEscape(Inst.getValues(), Loc);
     break;
   case MCCFIInstruction::OpRestore:
-    OutStreamer->emitCFIRestore(Inst.getRegister(), Loc);
+    // ROG's explicit entry rules live in the FDE, whereas DW_CFA_restore
+    // restores the CIE's initial rules. Keep the restored ABI registers
+    // available to consumers that do not infer callee-saved defaults.
+    if (is_contained(getROGCalleeSavedDwarfRegs(), Inst.getRegister()))
+      OutStreamer->emitCFISameValue(Inst.getRegister(), Loc);
+    else
+      OutStreamer->emitCFIRestore(Inst.getRegister(), Loc);
     break;
   case MCCFIInstruction::OpUndefined:
     OutStreamer->emitCFIUndefined(Inst.getRegister(), Loc);

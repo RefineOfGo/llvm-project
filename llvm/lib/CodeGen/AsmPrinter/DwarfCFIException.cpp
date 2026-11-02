@@ -119,6 +119,12 @@ void DwarfCFIException::beginBasicBlockSection(const MachineBasicBlock &MBB) {
 
   Asm->OutStreamer->emitCFIStartProc(/*IsSimple=*/false);
 
+  // Some DWARF consumers only recover explicitly described registers. Record
+  // ROG's ABI defaults at the actual entry, before stack checks or a
+  // shrink-wrapped prologue. Spills below replace these with their saved slots.
+  for (unsigned Reg : Asm->getROGCalleeSavedDwarfRegs())
+    Asm->OutStreamer->emitCFISameValue(Reg);
+
   // Indicate personality routine, if any.
   if (!shouldEmitPersonality)
     return;

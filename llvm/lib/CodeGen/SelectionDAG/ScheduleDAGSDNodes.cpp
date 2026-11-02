@@ -731,10 +731,11 @@ void ScheduleDAGSDNodes::VerifyScheduledSequence(bool isBottomUp) {
 #endif // NDEBUG
 
 /// ProcessSDDbgValues - Process SDDbgValues associated with this node.
-static void
-ProcessSDDbgValues(SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
-                   SmallVectorImpl<std::pair<unsigned, MachineInstr*> > &Orders,
-                   InstrEmitter::VRBaseMapType &VRBaseMap, unsigned Order) {
+static void ProcessSDDbgValues(
+    SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
+    SmallVectorImpl<std::pair<unsigned, MachineInstr *>> &Orders,
+    InstrEmitter::VRBaseMapType &VRBaseMap, unsigned Order,
+    const DenseMap<SDDbgValue *, SDDbgValue *> &PreviousDbgValues) {
   if (!N->getHasDebugValue())
     return;
 
@@ -759,6 +760,12 @@ ProcessSDDbgValues(SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
     unsigned DVOrder = DV->getOrder();
     if (Order != 0 && DVOrder != Order)
       continue;
+    // Do not move an assignment ahead of an earlier update to this variable.
+    // For example, a constant update has no associated node and is emitted
+    // later in source order, while a following register value can be ready now.
+    auto Previous = PreviousDbgValues.find(DV);
+    if (Previous != PreviousDbgValues.end() && !Previous->second->isEmitted())
+      continue;
     // If DV has any VReg location operands which haven't been mapped then
     // either that node is no longer available or we just haven't visited the
     // node yet. In the former case we should emit an undef dbg_value, but we
@@ -777,16 +784,18 @@ ProcessSDDbgValues(SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
 // ProcessSourceNode - Process nodes with source order numbers. These are added
 // to a vector which EmitSchedule uses to determine how to insert dbg_value
 // instructions in the right order.
-static void
-ProcessSourceNode(SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
-                  InstrEmitter::VRBaseMapType &VRBaseMap,
-                  SmallVectorImpl<std::pair<unsigned, MachineInstr *>> &Orders,
-                  SmallSet<Register, 8> &Seen, MachineInstr *NewInsn) {
+static void ProcessSourceNode(
+    SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
+    InstrEmitter::VRBaseMapType &VRBaseMap,
+    SmallVectorImpl<std::pair<unsigned, MachineInstr *>> &Orders,
+    SmallSet<Register, 8> &Seen, MachineInstr *NewInsn,
+    const DenseMap<SDDbgValue *, SDDbgValue *> &PreviousDbgValues) {
   unsigned Order = N->getIROrder();
   if (!Order || Seen.count(Order)) {
     // Process any valid SDDbgValues even if node does not have any order
     // assigned.
-    ProcessSDDbgValues(N, DAG, Emitter, Orders, VRBaseMap, 0);
+    ProcessSDDbgValues(N, DAG, Emitter, Orders, VRBaseMap, 0,
+                       PreviousDbgValues);
     return;
   }
 
@@ -801,7 +810,8 @@ ProcessSourceNode(SDNode *N, SelectionDAG *DAG, InstrEmitter &Emitter,
 
   // Even if no instruction was generated, a Value may have become defined via
   // earlier nodes. Try to process them now.
-  ProcessSDDbgValues(N, DAG, Emitter, Orders, VRBaseMap, Order);
+  ProcessSDDbgValues(N, DAG, Emitter, Orders, VRBaseMap, Order,
+                     PreviousDbgValues);
 }
 
 void ScheduleDAGSDNodes::
@@ -852,6 +862,24 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
   SmallVector<std::pair<unsigned, MachineInstr*>, 32> Orders;
   SmallSet<Register, 8> Seen;
   bool HasDbg = DAG->hasDebugValues();
+  DenseMap<SDDbgValue *, SDDbgValue *> PreviousDbgValues;
+  if (HasDbg) {
+    std::stable_sort(DAG->DbgBegin(), DAG->DbgEnd(),
+                     [](const SDDbgValue *LHS, const SDDbgValue *RHS) {
+                       return LHS->getOrder() < RHS->getOrder();
+                     });
+    // Include all fragments: a whole-variable update can overlap any fragment.
+    DenseMap<std::pair<DIVariable *, const DILocation *>, SDDbgValue *>
+        Previous;
+    for (SDDbgValue *DV : make_range(DAG->DbgBegin(), DAG->DbgEnd())) {
+      auto Key =
+          std::make_pair(DV->getVariable(), DV->getDebugLoc()->getInlinedAt());
+      SDDbgValue *&Prev = Previous[Key];
+      if (Prev)
+        PreviousDbgValues[DV] = Prev;
+      Prev = DV;
+    }
+  }
 
   // Emit a node, and determine where its first instruction is for debuginfo.
   // Zero, one, or multiple instructions can be created when emitting a node.
@@ -950,7 +978,8 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
       auto NewInsn = EmitNode(N, SU->OrigNode != SU, SU->isCloned, VRBaseMap);
       // Remember the source order of the inserted instruction.
       if (HasDbg)
-        ProcessSourceNode(N, DAG, Emitter, VRBaseMap, Orders, Seen, NewInsn);
+        ProcessSourceNode(N, DAG, Emitter, VRBaseMap, Orders, Seen, NewInsn,
+                          PreviousDbgValues);
 
       if (MDNode *MD = DAG->getHeapAllocSite(N))
         if (NewInsn && NewInsn->isCall())
@@ -963,7 +992,7 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
     // Remember the source order of the inserted instruction.
     if (HasDbg)
       ProcessSourceNode(SU->getNode(), DAG, Emitter, VRBaseMap, Orders, Seen,
-                        NewInsn);
+                        NewInsn, PreviousDbgValues);
 
     if (MDNode *MD = DAG->getHeapAllocSite(SU->getNode())) {
       if (NewInsn && NewInsn->isCall())
@@ -980,11 +1009,6 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
     // values. Use stable_sort so that DBG_VALUEs are inserted in the same order
     // regardless of the host's implementation fo std::sort.
     llvm::stable_sort(Orders, less_first());
-    std::stable_sort(DAG->DbgBegin(), DAG->DbgEnd(),
-                     [](const SDDbgValue *LHS, const SDDbgValue *RHS) {
-                       return LHS->getOrder() < RHS->getOrder();
-                     });
-
     SDDbgInfo::DbgIterator DI = DAG->DbgBegin();
     SDDbgInfo::DbgIterator DE = DAG->DbgEnd();
     // Now emit the rest according to source order.

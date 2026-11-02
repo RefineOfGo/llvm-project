@@ -54,8 +54,8 @@ for.body.lr.ph:                                   ; preds = %entry
 for.cond.cleanup:                                 ; preds = %for.body, %entry
 ; CHECK-LABEL: bb.{{.*}}.for.cond.cleanup:
 ; CHECK:         [[REG1:%[0-9]+]]:gr32 = PHI
-; INSTRREF-SAME:    debug-instr-number 7
-; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref(7, 0)
+; INSTRREF-SAME:    debug-instr-number [[CLEANUP:[0-9]+]]
+; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref([[CLEANUP]], 0)
 ; DBGVALUE-NEXT: DBG_VALUE [[REG1]]
   %x.0.lcssa = phi i32 [ 9, %entry ], [ %add, %for.body ]
   call void @llvm.dbg.value(metadata i32 %x.0.lcssa, metadata !15, metadata !DIExpression()), !dbg !26
@@ -67,14 +67,14 @@ for.cond.cleanup:                                 ; preds = %for.body, %entry
 for.body:                                         ; preds = %for.body.lr.ph, %for.body
 ; CHECK-LABEL: bb.{{.*}}.for.body:
 ; CHECK:        [[REG2:%[0-9]+]]:gr32 = PHI
-; INSTRREF-SAME:   debug-instr-number 3
+; INSTRREF-SAME:   debug-instr-number [[U_PHI:[0-9]+]]
 ; CHECK-NEXT:   [[REG3:%[0-9]+]]:gr32 = PHI
-; INSTRREF-SAME:   debug-instr-number 4
+; INSTRREF-SAME:   debug-instr-number [[Y_PHI:[0-9]+]]
 ; CHECK-NEXT:   [[REG4:%[0-9]+]]:gr32 = PHI
-; INSTRREF-SAME:   debug-instr-number 5
-; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref(3, 0)
-; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref(4, 0)
-; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref(5, 0)
+; INSTRREF-SAME:   debug-instr-number [[X_PHI:[0-9]+]]
+; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref([[U_PHI]], 0)
+; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref([[Y_PHI]], 0)
+; INSTRREF-NEXT: DBG_INSTR_REF {{.+}}, dbg-instr-ref([[X_PHI]], 0)
 ; DBGVALUE-NEXT: DBG_VALUE [[REG2]]
 ; DBGVALUE-NEXT: DBG_VALUE [[REG3]]
 ; DBGVALUE-NEXT: DBG_VALUE [[REG4]]

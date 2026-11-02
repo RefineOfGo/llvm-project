@@ -1363,6 +1363,19 @@ bool EarlyCSE::processNode(DomTreeNode *Node) {
         continue;
       }
 
+      // Debug-only loads are dead, but a dominating load or store may already
+      // provide their value. Reuse it before deletion makes debug users poison;
+      // do not keep a load alive or create a new instruction for debug info.
+      if (auto *LI = dyn_cast<LoadInst>(&Inst); LI && LI->isUsedByMetadata()) {
+        ParseMemoryInst MemInst(LI, TTI);
+        LoadValue InVal = AvailableLoads.lookup(MemInst.getPointerOperand());
+        // Do not spend the shared MemorySSA query budget on debug users.
+        if (InVal.DefInst && InVal.Generation == CurrentGeneration &&
+            isa<LoadInst, StoreInst>(InVal.DefInst))
+          if (Value *V = getMatchingValue(InVal, MemInst, CurrentGeneration))
+            LI->replaceAllUsesWith(V);
+      }
+
       salvageKnowledge(&Inst, &AC);
       salvageDebugInfo(Inst);
       removeMSSA(Inst);

@@ -673,6 +673,7 @@ public:
 
 private:
   unsigned ClobberCounter = 0;
+  unsigned DebugClobberCounter = 0;
   // Almost a POD, but needs to call the constructors for the scoped hash
   // tables so that a new scope gets pushed on. These are RAII so that the
   // scope gets popped when the NodeScope is destroyed.
@@ -899,7 +900,8 @@ private:
                              const BasicBlock *BB, const BasicBlock *Pred);
 
   Value *getMatchingValue(LoadValue &InVal, ParseMemoryInst &MemInst,
-                          unsigned CurrentGeneration);
+                          unsigned CurrentGeneration,
+                          bool ForDebugInfo = false);
 
   bool overridingStores(const ParseMemoryInst &Earlier,
                         const ParseMemoryInst &Later);
@@ -933,7 +935,8 @@ private:
   bool isOperatingOnInvariantMemAt(Instruction *I, unsigned GenAt);
 
   bool isSameMemGeneration(unsigned EarlierGeneration, unsigned LaterGeneration,
-                           Instruction *EarlierInst, Instruction *LaterInst);
+                           Instruction *EarlierInst, Instruction *LaterInst,
+                           bool ForDebugInfo = false);
 
   bool isNonTargetIntrinsicMatch(const IntrinsicInst *Earlier,
                                  const IntrinsicInst *Later) {
@@ -1066,7 +1069,7 @@ private:
 bool EarlyCSE::isSameMemGeneration(unsigned EarlierGeneration,
                                    unsigned LaterGeneration,
                                    Instruction *EarlierInst,
-                                   Instruction *LaterInst) {
+                                   Instruction *LaterInst, bool ForDebugInfo) {
   // Check the simple memory generation tracking first.
   if (EarlierGeneration == LaterGeneration)
     return true;
@@ -1093,9 +1096,12 @@ bool EarlyCSE::isSameMemGeneration(unsigned EarlierGeneration,
   // EarlierInst and LaterInst and neither can any other write that potentially
   // clobbers LaterInst.
   MemoryAccess *LaterDef;
-  if (ClobberCounter < EarlyCSEMssaOptCap) {
+  // Debug-only loads must not consume the optimization query budget. Otherwise
+  // retaining debug information can change which program loads are eliminated.
+  unsigned &Counter = ForDebugInfo ? DebugClobberCounter : ClobberCounter;
+  if (Counter < EarlyCSEMssaOptCap) {
     LaterDef = MSSA->getWalker()->getClobberingMemoryAccess(LaterInst);
-    ClobberCounter++;
+    Counter++;
   } else
     LaterDef = LaterMA->getDefiningAccess();
 
@@ -1181,7 +1187,8 @@ bool EarlyCSE::handleBranchCondition(Instruction *CondInst,
 }
 
 Value *EarlyCSE::getMatchingValue(LoadValue &InVal, ParseMemoryInst &MemInst,
-                                  unsigned CurrentGeneration) {
+                                  unsigned CurrentGeneration,
+                                  bool ForDebugInfo) {
   if (InVal.DefInst == nullptr)
     return nullptr;
   if (auto *MSI = dyn_cast<MemSetInst>(InVal.DefInst)) {
@@ -1204,7 +1211,7 @@ Value *EarlyCSE::getMatchingValue(LoadValue &InVal, ParseMemoryInst &MemInst,
       return nullptr;
     if (!isOperatingOnInvariantMemAt(MemInst.get(), InVal.Generation) &&
         !isSameMemGeneration(InVal.Generation, CurrentGeneration, InVal.DefInst,
-                             MemInst.get()))
+                             MemInst.get(), ForDebugInfo))
       return nullptr;
     return Constant::getNullValue(MemInst.getValueType());
   }
@@ -1246,7 +1253,7 @@ Value *EarlyCSE::getMatchingValue(LoadValue &InVal, ParseMemoryInst &MemInst,
 
   if (!isOperatingOnInvariantMemAt(MemInst.get(), InVal.Generation) &&
       !isSameMemGeneration(InVal.Generation, CurrentGeneration, InVal.DefInst,
-                           MemInst.get()))
+                           MemInst.get(), ForDebugInfo))
     return nullptr;
 
   if (!Result)
@@ -1363,16 +1370,23 @@ bool EarlyCSE::processNode(DomTreeNode *Node) {
         continue;
       }
 
+      // Simplify a debug-only aggregate extraction before deletion. An
+      // extractvalue of an insertvalue chain can already be represented by an
+      // existing scalar even though no program instruction uses the extract.
+      // Instruction simplification never creates instructions for debug users.
+      if (isa<ExtractValueInst>(Inst) && Inst.isUsedByMetadata())
+        if (Value *V = simplifyInstruction(&Inst, SQ))
+          Inst.replaceAllUsesWith(V);
+
       // Debug-only loads are dead, but a dominating load or store may already
       // provide their value. Reuse it before deletion makes debug users poison;
       // do not keep a load alive or create a new instruction for debug info.
       if (auto *LI = dyn_cast<LoadInst>(&Inst); LI && LI->isUsedByMetadata()) {
         ParseMemoryInst MemInst(LI, TTI);
         LoadValue InVal = AvailableLoads.lookup(MemInst.getPointerOperand());
-        // Do not spend the shared MemorySSA query budget on debug users.
-        if (InVal.DefInst && InVal.Generation == CurrentGeneration &&
-            isa<LoadInst, StoreInst>(InVal.DefInst))
-          if (Value *V = getMatchingValue(InVal, MemInst, CurrentGeneration))
+        if (InVal.DefInst && isa<LoadInst, StoreInst>(InVal.DefInst))
+          if (Value *V = getMatchingValue(InVal, MemInst, CurrentGeneration,
+                                          /*ForDebugInfo=*/true))
             LI->replaceAllUsesWith(V);
       }
 

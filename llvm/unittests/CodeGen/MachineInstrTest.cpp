@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -17,6 +18,7 @@
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/MemoryModelRelaxationAnnotations.h"
@@ -679,6 +681,72 @@ TEST(MachineInstr, EraseFromParentReturnedIteratorBundle) {
   // Erasing MI1B2 erases the whole Bundle2.
   MachineBasicBlock::iterator It2 = MI1B2->eraseFromParent();
   EXPECT_EQ(It2, MBB->end());
+}
+
+// Source provenance must survive without optional call-site parameter output;
+// otherwise a late debug proof can be lost on clone or left dangling on erase.
+TEST(MachineInstrTest, ROGCallProvenanceWithoutOptionalEmission) {
+  LLVMContext Ctx;
+  Module Mod("Module", Ctx);
+  auto MF = createMachineFunction(Ctx, Mod);
+  TargetOptions &Options = createTargetMachine()->Options;
+  TargetOptions SavedOptions = Options;
+  auto RestoreOptions = make_scope_exit([&] { Options = SavedOptions; });
+  Options.EmitCallSiteInfo = false;
+  Options.EmitCallGraphSection = false;
+  ASSERT_FALSE(MF->getTarget().Options.EmitCallSiteInfo);
+  ASSERT_FALSE(MF->getTarget().Options.EmitCallGraphSection);
+  DIBuilder DIB(Mod);
+  auto *File = DIB.createFile("memory.go", "/");
+  DIB.createCompileUnit(dwarf::DW_LANG_Go, File, "regression", true, "", 0);
+  auto *Ty = DIB.createSubroutineType(DIB.getOrCreateTypeArray({}));
+  auto MakeSP = [&](StringRef Name) {
+    return DIB.createFunction(File, Name, Name, File, 1, Ty, 1,
+                              DINode::FlagZero, DISubprogram::SPFlagDefinition);
+  };
+  Function &Caller = MF->getFunction();
+  Caller.setCallingConv(CallingConv::ROG);
+  Caller.setSubprogram(MakeSP("caller"));
+  auto *Callee = Function::Create(Caller.getFunctionType(),
+                                  GlobalValue::ExternalLinkage, "callee", Mod);
+  Callee->setCallingConv(CallingConv::ROG);
+  Callee->setSubprogram(MakeSP("callee"));
+  IRBuilder<> Builder(BasicBlock::Create(Ctx, "entry", Callee));
+  Builder.CreateRetVoid();
+  Builder.SetInsertPoint(BasicBlock::Create(Ctx, "entry", &Caller));
+  auto *Call = Builder.CreateCall(Callee);
+  Call->setCallingConv(CallingConv::ROG);
+  Builder.CreateRetVoid();
+  DIB.finalize();
+
+  struct ExposedLowering : BogusTargetLowering {
+    using BogusTargetLowering::BogusTargetLowering;
+    using TargetLowering::setTypeIdForCallsiteInfo;
+  };
+  ExposedLowering TLI(MF->getTarget(), MF->getSubtarget());
+  MachineFunction::CallSiteInfo Source, Synthesized;
+  TLI.setTypeIdForCallsiteInfo(Call, *MF, Source);
+  TLI.setTypeIdForCallsiteInfo(nullptr, *MF, Synthesized);
+  EXPECT_EQ(Source.CallTarget, Callee->getSubprogram());
+  EXPECT_EQ(Synthesized.CallTarget, nullptr);
+
+  auto *MBB = MF->CreateMachineBasicBlock();
+  MF->push_back(MBB);
+  MCInstrDesc Desc = {10000, 0, 0, 0, 0, 0, 0, 0, 0, 1ULL << MCID::Call, 0};
+  auto *Original = MF->CreateMachineInstr(Desc, DebugLoc());
+  MBB->insert(MBB->end(), Original);
+  MF->addCallSiteInfo(Original, std::move(Source));
+  MachineInstr &Clone =
+      MF->cloneMachineInstrBundle(*MBB, MBB->end(), *Original);
+  ASSERT_TRUE(MF->getCallSitesInfo().contains(&Clone));
+  EXPECT_EQ(MF->getCallSitesInfo().find(&Clone)->second.CallTarget,
+            Callee->getSubprogram());
+  MF->eraseAdditionalCallInfo(Original);
+  Original->eraseFromParent();
+  EXPECT_FALSE(MF->getCallSitesInfo().contains(Original));
+  MF->eraseAdditionalCallInfo(&Clone);
+  Clone.eraseFromParent();
+  EXPECT_TRUE(MF->getCallSitesInfo().empty());
 }
 
 } // end namespace

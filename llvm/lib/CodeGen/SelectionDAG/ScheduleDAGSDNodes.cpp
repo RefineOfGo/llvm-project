@@ -913,9 +913,10 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
     }
 
     if (MI->isCandidateForAdditionalCallInfo()) {
+      auto CallInfo = DAG->getCallSiteInfo(Node);
       if (DAG->getTarget().Options.EmitCallSiteInfo ||
-          DAG->getTarget().Options.EmitCallGraphSection)
-        MF.addCallSiteInfo(MI, DAG->getCallSiteInfo(Node));
+          DAG->getTarget().Options.EmitCallGraphSection || CallInfo.CallTarget)
+        MF.addCallSiteInfo(MI, std::move(CallInfo));
 
       if (auto CalledGlobal = DAG->getCalledGlobal(Node))
         if (CalledGlobal->Callee)

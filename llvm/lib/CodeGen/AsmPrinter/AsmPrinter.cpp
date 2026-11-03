@@ -30,9 +30,11 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/BinaryFormat/ELF.h"
@@ -51,13 +53,16 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineInstrBundle.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -69,10 +74,12 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Comdat.h"
 #include "llvm/IR/Constant.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GCStrategy.h"
@@ -81,6 +88,7 @@
 #include "llvm/IR/GlobalObject.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMRemarkStreamer.h"
@@ -89,6 +97,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PseudoProbe.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/ValueHandle.h"
@@ -3178,8 +3187,674 @@ MCSymbol *AsmPrinter::createCallsiteEndSymbol(const MachineBasicBlock &MBB) {
   return Sym;
 }
 
+static StringRef rogMemoryAnnotation(const DILocalVariable &Var,
+                                     StringRef Key) {
+  if (!Var.getAnnotations())
+    return {};
+  for (const MDOperand &Operand : Var.getAnnotations()->operands()) {
+    auto *Annotation = dyn_cast_or_null<MDNode>(Operand);
+    if (!Annotation)
+      continue;
+    if (Annotation->getNumOperands() != 2)
+      continue;
+    auto *Name = dyn_cast_or_null<MDString>(Annotation->getOperand(0));
+    auto *Value = dyn_cast_or_null<MDString>(Annotation->getOperand(1));
+    if (Name && Value && Name->getString() == Key)
+      return Value->getString();
+  }
+  return {};
+}
+
+// These intervals describe bytes actually initialized by emitted stores. No
+// debug record is allowed to make a byte readable before the machine writes it.
+using ROGWrittenBytes = SmallVector<std::pair<int64_t, int64_t>, 2>;
+
+static void addROGWrittenBytes(ROGWrittenBytes &Bytes, int64_t Begin,
+                               int64_t End) {
+  if (Begin >= End)
+    return;
+  Bytes.emplace_back(Begin, End);
+  llvm::sort(Bytes);
+  ROGWrittenBytes Result;
+  for (auto Range : Bytes) {
+    if (!Result.empty() && Result.back().second >= Range.first)
+      Result.back().second = std::max(Result.back().second, Range.second);
+    else
+      Result.push_back(Range);
+  }
+  Bytes = std::move(Result);
+}
+
+static void removeROGWrittenBytes(ROGWrittenBytes &Bytes, int64_t Begin,
+                                  int64_t End) {
+  ROGWrittenBytes Remaining;
+  for (auto [Start, Stop] : Bytes) {
+    addROGWrittenBytes(Remaining, Start, std::min(Stop, Begin));
+    addROGWrittenBytes(Remaining, std::max(Start, End), Stop);
+  }
+  Bytes = std::move(Remaining);
+}
+
+static ROGWrittenBytes intersectROGWrittenBytes(const ROGWrittenBytes &A,
+                                                const ROGWrittenBytes &B) {
+  ROGWrittenBytes Result;
+  for (auto X : A)
+    for (auto Y : B)
+      addROGWrittenBytes(Result, std::max(X.first, Y.first),
+                         std::min(X.second, Y.second));
+  return Result;
+}
+
+// An MMO only promises a possible write. Certify the complete, unconditional
+// stores supported by this x86-64 protocol; masked, conditional, atomic,
+// call and unknown instructions must not turn missing bytes into readable ones.
+// These widths follow X86InstrInfo::isFrameStoreOpcode plus immediate stores.
+static bool isROGCompleteStore(const MachineInstr &MI,
+                               const TargetInstrInfo &TII) {
+  if (MI.memoperands().size() != 1)
+    return false;
+  const MachineMemOperand &MMO = **MI.memoperands_begin();
+  if (!MMO.isStore() || MMO.isAtomic() || !MMO.getSize().hasValue() ||
+      MMO.getSize().isScalable())
+    return false;
+  unsigned Width =
+      StringSwitch<unsigned>(TII.getName(MI.getOpcode()))
+          .Cases({"MOV8mr", "KMOVBmk", "KMOVBmk_EVEX", "MOV8mi"}, 1)
+          .Cases({"MOV16mr", "KMOVWmk", "KMOVWmk_EVEX", "VMOVSHZmr", "MOV16mi"},
+                 2)
+          .Cases({"MOV32mr", "MOVSSmr", "VMOVSSmr", "VMOVSSZmr", "KMOVDmk",
+                  "KMOVDmk_EVEX", "MOV32mi"},
+                 4)
+          .Cases({"MOV64mr", "ST_FpP64m", "MOVSDmr", "VMOVSDmr", "VMOVSDZmr",
+                  "MMX_MOVD64mr", "MMX_MOVQ64mr", "MMX_MOVNTQmr", "KMOVQmk",
+                  "KMOVQmk_EVEX", "MOV64mi32"},
+                 8)
+          .Cases({"MOVAPSmr",
+                  "MOVUPSmr",
+                  "MOVAPDmr",
+                  "MOVUPDmr",
+                  "MOVDQAmr",
+                  "MOVDQUmr",
+                  "VMOVAPSmr",
+                  "VMOVUPSmr",
+                  "VMOVAPDmr",
+                  "VMOVUPDmr",
+                  "VMOVDQAmr",
+                  "VMOVDQUmr",
+                  "VMOVUPSZ128mr",
+                  "VMOVAPSZ128mr",
+                  "VMOVUPSZ128mr_NOVLX",
+                  "VMOVAPSZ128mr_NOVLX",
+                  "VMOVUPDZ128mr",
+                  "VMOVAPDZ128mr",
+                  "VMOVDQA32Z128mr",
+                  "VMOVDQU32Z128mr",
+                  "VMOVDQA64Z128mr",
+                  "VMOVDQU64Z128mr",
+                  "VMOVDQU8Z128mr",
+                  "VMOVDQU16Z128mr"},
+                 16)
+          .Cases({"VMOVUPSYmr", "VMOVAPSYmr", "VMOVUPDYmr", "VMOVAPDYmr",
+                  "VMOVDQUYmr", "VMOVDQAYmr", "VMOVUPSZ256mr", "VMOVAPSZ256mr",
+                  "VMOVUPSZ256mr_NOVLX", "VMOVAPSZ256mr_NOVLX", "VMOVUPDZ256mr",
+                  "VMOVAPDZ256mr", "VMOVDQU8Z256mr", "VMOVDQU16Z256mr",
+                  "VMOVDQA32Z256mr", "VMOVDQU32Z256mr", "VMOVDQA64Z256mr",
+                  "VMOVDQU64Z256mr"},
+                 32)
+          .Cases({"VMOVUPSZmr", "VMOVAPSZmr", "VMOVUPDZmr", "VMOVAPDZmr",
+                  "VMOVDQU8Zmr", "VMOVDQU16Zmr", "VMOVDQA32Zmr", "VMOVDQU32Zmr",
+                  "VMOVDQA64Zmr", "VMOVDQU64Zmr"},
+                 64)
+          .Default(0);
+  return Width && MMO.getSize().getValue().getFixedValue() == Width;
+}
+
+// An emitted MOV can still carry undef or poison. Without an exact IR store
+// identity in the MMO, require defined values for every overlapping source
+// store candidate and complete coverage of the bytes being made readable.
+static bool rogStoreHasDefinedSource(const Function &F, const Value *Object,
+                                     int64_t Begin, int64_t End) {
+  if (Begin >= End)
+    return false;
+  ROGWrittenBytes Covered;
+  const DataLayout &DL = F.getDataLayout();
+  for (const Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    int64_t Offset = 0;
+    if (GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset, DL) !=
+        Object)
+      continue;
+    TypeSize Size = DL.getTypeStoreSize(SI->getValueOperand()->getType());
+    if (Offset < 0 || Size.isScalable() ||
+        Size.getFixedValue() > uint64_t(INT64_MAX - Offset))
+      return false;
+    int64_t Limit = Offset + Size.getFixedValue();
+    if (Limit <= Begin || Offset >= End)
+      continue;
+    if (!isGuaranteedNotToBeUndefOrPoison(SI->getValueOperand()))
+      return false;
+    addROGWrittenBytes(Covered, std::max(Begin, Offset), std::min(End, Limit));
+  }
+  return Covered.size() == 1 && Covered[0].first == Begin &&
+         Covered[0].second == End;
+}
+
+// Statepoint actual arguments use the real callee's capture contract, not
+// the vararg intrinsic's default contract. All other uses (including unknown
+// operand bundles) retain CaptureTracking's conservative behavior.
+static bool rogPointerMayBeCaptured(const Value *Object) {
+  struct Tracker final : CaptureTracker {
+    bool Captured = false;
+    void tooManyUses() override { Captured = true; }
+    bool shouldExplore(const Use *U) override {
+      auto *SP = dyn_cast<GCStatepointInst>(U->getUser());
+      if (!SP || !SP->isArgOperand(U))
+        return true;
+      unsigned Index = SP->getArgOperandNo(U);
+      if (Index < GCStatepointInst::CallArgsBeginPos ||
+          Index >= GCStatepointInst::CallArgsBeginPos + SP->actual_arg_size())
+        return true;
+      const Function *Callee = SP->getActualCalledFunction();
+      if (!Callee)
+        return true;
+      CaptureInfo CI =
+          Callee->getAttributes()
+              .getParamAttrs(Index - GCStatepointInst::CallArgsBeginPos)
+              .getCaptureInfo();
+      return capturesAnything(CI.getOtherComponents() | CI.getRetComponents());
+    }
+    Action captured(const Use *, UseCaptureInfo CI) override {
+      Captured |= capturesAnything(CI.UseCC | CI.ResultCC);
+      return Captured ? Stop : Continue;
+    }
+  } T;
+  PointerMayBeCaptured(Object, &T);
+  return T.Captured;
+}
+
+// initializes permits an implicit undef write on return, so it cannot itself
+// establish defined debugger-readable memory. Require a final-IR defined-write
+// postcondition on every normal return. Codegen must preserve this observable
+// postcondition; redundant-store elimination needs already valid equal bytes.
+static ROGWrittenBytes rogDefinedReturnWrites(const Function &F,
+                                              unsigned ArgNo) {
+  ROGWrittenBytes Result;
+  if (F.isDeclaration() || ArgNo >= F.arg_size())
+    return Result;
+  const Argument *Arg = F.getArg(ArgNo);
+  if (!Arg->getType()->isPointerTy() || Arg->hasByValAttr() ||
+      Arg->hasAttribute(Attribute::DeadOnReturn))
+    return Result;
+  const DataLayout &DL = F.getDataLayout();
+  bool NotCaptured = Arg->hasNoCaptureAttr() || !rogPointerMayBeCaptured(Arg);
+  auto Transfer = [&](const Instruction &I, ROGWrittenBytes &Bytes) {
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      int64_t Offset = 0;
+      const Value *Base =
+          GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset, DL);
+      if (!isGuaranteedNotToBeUndefOrPoison(SI->getValueOperand())) {
+        // This summary is used only for an unescaped caller-local alloca.
+        // Direct callee allocas and globals cannot be that object, even when
+        // the argument itself is captured later in this function.
+        if (!isa<AllocaInst>(Base) && !isa<GlobalVariable>(Base))
+          Bytes.clear();
+        return;
+      }
+      TypeSize Size = DL.getTypeStoreSize(SI->getValueOperand()->getType());
+      if (Base == Arg && !SI->isAtomic() && !SI->isVolatile() && Offset >= 0 &&
+          !Size.isScalable() && Size.getFixedValue() &&
+          Size.getFixedValue() <= uint64_t(INT64_MAX - Offset))
+        addROGWrittenBytes(Bytes, Offset, Offset + Size.getFixedValue());
+      return;
+    }
+    if (auto *CB = dyn_cast<CallBase>(&I)) {
+      auto *SPCall = dyn_cast<GCStatepointInst>(CB);
+      const Function *Actual =
+          SPCall ? SPCall->getActualCalledFunction() : nullptr;
+      MemoryEffects Effects =
+          Actual ? Actual->getMemoryEffects() : CB->getMemoryEffects();
+      // A caller-local object which has not escaped is not reachable through
+      // other/global memory. Noncapturing callees preserve that property.
+      if (Effects.onlyReadsMemory() ||
+          (NotCaptured && !isModSet(Effects.getModRef(IRMemLocation::ArgMem))))
+        return;
+      Bytes.clear();
+      return;
+    }
+    if (I.mayWriteToMemory() && !isa<FenceInst>(I))
+      Bytes.clear();
+  };
+  DenseMap<const BasicBlock *, ROGWrittenBytes> Outputs;
+  bool Changed;
+  do {
+    Changed = false;
+    for (const BasicBlock &BB : F) {
+      ROGWrittenBytes Bytes;
+      bool First = true;
+      for (const BasicBlock *Pred : predecessors(&BB)) {
+        if (First)
+          Bytes = Outputs[Pred];
+        else
+          Bytes = intersectROGWrittenBytes(Bytes, Outputs[Pred]);
+        First = false;
+      }
+      for (const Instruction &I : BB)
+        Transfer(I, Bytes);
+      if (Bytes != Outputs[&BB]) {
+        Outputs[&BB] = std::move(Bytes);
+        Changed = true;
+      }
+    }
+  } while (Changed);
+  bool FirstReturn = true;
+  for (const BasicBlock &BB : F)
+    if (isa<ReturnInst>(BB.getTerminator())) {
+      if (FirstReturn)
+        Result = Outputs[&BB];
+      else
+        Result = intersectROGWrittenBytes(Result, Outputs[&BB]);
+      FirstReturn = false;
+    }
+  return Result;
+}
+
+static void finalizeROGMemoryAvailability(MachineFunction &MF) {
+  Function &F = MF.getFunction();
+  DISubprogram *SP = F.getSubprogram();
+  if (!MF.getTarget().getTargetTriple().isArch64Bit() ||
+      MF.getTarget().getTargetTriple().getArch() != Triple::x86_64 || !SP ||
+      !SP->getUnit() ||
+      SP->getUnit()->getEmissionKind() != DICompileUnit::FullDebug ||
+      SP->getUnit()->getSourceLanguage().getName() != dwarf::DW_LANG_Go ||
+      (F.getCallingConv() != CallingConv::ROG &&
+       F.getCallingConv() != CallingConv::ROG_Cold))
+    return;
+
+  const DataLayout &DL = F.getDataLayout();
+  const auto &TII = *MF.getSubtarget().getInstrInfo();
+  struct Descriptor {
+    const DILocalVariable *Var;
+    const DILocation *Loc;
+    const Value *Object;
+    int64_t Offset;
+    uint64_t Size;
+  };
+  SmallVector<Descriptor, 4> Descriptors;
+  for (const auto &VI : MF.getVariableDbgInfo()) {
+    StringRef SizeText = rogMemoryAnnotation(*VI.Var, "ROGMemoryUnavailable");
+    uint64_t Size;
+    if (SizeText.empty() || SizeText.getAsInteger(10, Size) || !Size ||
+        !VI.inStackSlot())
+      continue;
+    const AllocaInst *Object =
+        MF.getFrameInfo().getObjectAllocation(VI.getStackSlot());
+    if (!Object)
+      continue;
+    int64_t Offset = 0;
+    bool ValidExpression = true;
+    for (auto Op : VI.Expr->expr_ops()) {
+      if (Op.getOp() == dwarf::DW_OP_plus_uconst) {
+        if (Op.getArg(0) > uint64_t(INT64_MAX - Offset)) {
+          ValidExpression = false;
+          break;
+        }
+        Offset += Op.getArg(0);
+      } else if (Op.getOp() != dwarf::DW_OP_stack_value)
+        ValidExpression = false;
+    }
+    if (ValidExpression && Offset >= 0 && Size <= uint64_t(INT64_MAX - Offset))
+      Descriptors.push_back({VI.Var, VI.Loc, Object, Offset, Size});
+  }
+  for (MDNode *Node : SP->getRetainedNodes()) {
+    auto *Var = dyn_cast<DILocalVariable>(Node);
+    if (!Var)
+      continue;
+    StringRef SizeText = rogMemoryAnnotation(*Var, "ROGMemoryAvailable");
+    uint64_t Size, ArgIndex, Offset;
+    if (SizeText.empty() || SizeText.getAsInteger(10, Size) || !Size ||
+        rogMemoryAnnotation(*Var, "ROGMemoryArgument")
+            .getAsInteger(10, ArgIndex) ||
+        rogMemoryAnnotation(*Var, "ROGMemoryOffset").getAsInteger(10, Offset) ||
+        ArgIndex >= F.arg_size() || Offset > uint64_t(INT64_MAX) ||
+        Size > uint64_t(INT64_MAX) - Offset)
+      continue;
+    Descriptors.push_back({Var, DILocation::get(F.getContext(), 0, 0, SP),
+                           F.getArg(ArgIndex), int64_t(Offset), Size});
+  }
+  if (Descriptors.empty())
+    return;
+  DenseMap<const Value *, bool> CaptureCache;
+  DenseMap<std::pair<const Function *, unsigned>, ROGWrittenBytes> DefinedCache;
+  DenseMap<std::pair<const Value *, std::pair<int64_t, int64_t>>, bool>
+      StoreSourceCache;
+  for (const Descriptor &D : Descriptors) {
+    const Value *Object = D.Object;
+    int64_t Offset = D.Offset;
+    int64_t End = Offset + D.Size;
+    // The qualification belongs to this concrete, non-inlined local instance.
+    // Never mark an abstract variable shared by different objects or ranges.
+    auto [CapturedIt, NewCapture] = CaptureCache.try_emplace(Object, true);
+    if (NewCapture)
+      CapturedIt->second = rogPointerMayBeCaptured(Object);
+    bool FreshLocal =
+        isa<AllocaInst>(Object) && D.Loc &&
+        D.Var->getScope()->getSubprogram() == SP && !D.Loc->getInlinedAt() &&
+        llvm::count_if(MF.getVariableDbgInfo(),
+                       [&](const auto &VI) { return VI.Var == D.Var; }) ==
+            llvm::count_if(
+                Descriptors,
+                [&](const Descriptor &Other) { return Other.Var == D.Var; }) &&
+        llvm::all_of(Descriptors,
+                     [&](const Descriptor &Other) {
+                       return Other.Var != D.Var ||
+                              (Other.Object == Object &&
+                               Other.Offset == Offset && Other.Size == D.Size &&
+                               !Other.Loc->getInlinedAt());
+                     }) &&
+        !CapturedIt->second;
+    if (isa<AllocaInst>(Object)) {
+      SmallVector<Metadata *, 4> Annotations;
+      if (D.Var->getAnnotations())
+        for (const MDOperand &Operand : D.Var->getAnnotations()->operands()) {
+          auto *Tuple = dyn_cast_or_null<MDNode>(Operand);
+          auto *Name = Tuple && Tuple->getNumOperands()
+                           ? dyn_cast_or_null<MDString>(Tuple->getOperand(0))
+                           : nullptr;
+          if (!Name || Name->getString() != "ROGMemoryFreshLocal")
+            Annotations.push_back(Operand);
+        }
+      if (FreshLocal)
+        Annotations.push_back(
+            MDNode::get(F.getContext(),
+                        {MDString::get(F.getContext(), "ROGMemoryFreshLocal"),
+                         MDString::get(F.getContext(), "1")}));
+      const_cast<DILocalVariable *>(D.Var)->replaceOperandWith(
+          4, MDNode::get(F.getContext(), Annotations));
+    }
+    // A positive argument descriptor is conditional on a fresh caller-local
+    // negative descriptor. The consumer must not apply it to escaped/global
+    // storage. This permits only OtherMem disjointness, never argument noalias.
+    bool OtherMemDisjoint = FreshLocal || isa<Argument>(Object);
+    const DILocalVariable *State = nullptr;
+    for (MDNode *Node : SP->getRetainedNodes())
+      if (auto *Var = dyn_cast<DILocalVariable>(Node))
+        if (rogMemoryAnnotation(*Var, "ROGMemoryState") == D.Var->getName()) {
+          State = Var;
+          break;
+        }
+    if (!State)
+      continue;
+
+    // The MI records its source callee, but not an individual CallBase. Take
+    // the intersection of every IR call to that exact callee, so ambiguous
+    // argument mappings can never manufacture a proof for this object.
+    DenseMap<const Function *, ROGWrittenBytes> CallWrites;
+    for (const Instruction &I : instructions(F)) {
+      auto *CB = dyn_cast<CallBase>(&I);
+      auto *SPCall = dyn_cast_or_null<GCStatepointInst>(CB);
+      const Function *Callee = SPCall ? SPCall->getActualCalledFunction()
+                               : CB   ? CB->getCalledFunction()
+                                      : nullptr;
+      if (!Callee)
+        continue;
+      ROGWrittenBytes Written;
+      unsigned ArgCount = SPCall ? SPCall->actual_arg_size() : CB->arg_size();
+      unsigned ArgBegin = SPCall ? GCStatepointInst::CallArgsBeginPos : 0;
+      if (FreshLocal && isa<CallInst>(CB) &&
+          (!SPCall || !SPCall->getNumPatchBytes()))
+        for (unsigned A = 0; A < ArgCount; ++A) {
+          Attribute Init = SPCall ? Callee->getAttributes().getParamAttr(
+                                        A, Attribute::Initializes)
+                                  : CB->getParamAttr(A, Attribute::Initializes);
+          if (!Init.isValid() || CB->isByValArgument(A + ArgBegin) ||
+              CB->paramHasAttr(A + ArgBegin, Attribute::DeadOnReturn) ||
+              Callee->getAttributes().hasParamAttr(A, Attribute::ByVal))
+            continue;
+          int64_t ArgOffset = 0;
+          if (GetPointerBaseWithConstantOffset(CB->getArgOperand(A + ArgBegin),
+                                               ArgOffset, DL) != Object)
+            continue;
+          auto [DefinedIt, New] = DefinedCache.try_emplace({Callee, A});
+          if (New)
+            DefinedIt->second = rogDefinedReturnWrites(*Callee, A);
+          const ROGWrittenBytes &Defined = DefinedIt->second;
+          for (const ConstantRange &R : Init.getInitializes()) {
+            int64_t Begin = R.getLower().getSExtValue();
+            int64_t Limit = R.getUpper().getSExtValue();
+            if (Begin >= Limit ||
+                (ArgOffset > 0 && Limit > INT64_MAX - ArgOffset) ||
+                (ArgOffset < 0 && Begin < INT64_MIN - ArgOffset))
+              continue;
+            for (auto [DefinedBegin, DefinedEnd] : Defined) {
+              int64_t Start = std::max(Begin, DefinedBegin);
+              int64_t Stop = std::min(Limit, DefinedEnd);
+              if (Start < Stop)
+                addROGWrittenBytes(Written, std::max(Offset, ArgOffset + Start),
+                                   std::min(End, ArgOffset + Stop));
+            }
+          }
+        }
+      auto [It, New] = CallWrites.try_emplace(Callee, Written);
+      if (!New)
+        It->second = intersectROGWrittenBytes(It->second, Written);
+    }
+
+    // Early LiveDebugValues may have copied the initial state to many blocks.
+    // Reconstruct it from non-propagated labels and actual surviving stores.
+    for (auto &MBB : MF)
+      for (MachineInstr &MI : make_early_inc_range(MBB))
+        if (MI.isDebugValue() && MI.getDebugVariable() == State)
+          MI.eraseFromParent();
+
+    std::string InvalidName = (D.Var->getName() + ".invalid.").str();
+    std::string EndName = (D.Var->getName() + ".end.").str();
+    struct RangeState {
+      ROGWrittenBytes Bytes;
+      bool Active = false;
+      bool operator==(const RangeState &Other) const {
+        return Active == Other.Active && Bytes == Other.Bytes;
+      }
+      bool operator!=(const RangeState &Other) const {
+        return !(*this == Other);
+      }
+    };
+    bool HasInvalidLabel = false;
+    for (const auto &MBB : MF)
+      for (const auto &MI : MBB)
+        HasInvalidLabel |=
+            MI.isDebugLabel() &&
+            MI.getDebugLabel()->getName().starts_with(InvalidName);
+    auto Transfer = [&](const MachineInstr &MI, RangeState &S) {
+      if (MI.isDebugLabel() &&
+          MI.getDebugLabel()->getName().starts_with(InvalidName)) {
+        S.Active = true;
+        S.Bytes.clear();
+        return;
+      }
+      if (MI.isDebugLabel() &&
+          MI.getDebugLabel()->getName().starts_with(EndName)) {
+        S.Active = false;
+        S.Bytes.clear();
+        return;
+      }
+      if (!S.Active)
+        return;
+      if (MI.isCall()) {
+        const Function *Callee = nullptr;
+        bool FoundSource = false;
+        if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+          StatepointOpers Ops(&MI);
+          const MachineOperand &Target = Ops.getCallTarget();
+          if (!Ops.getNumPatchBytes() && Target.isGlobal()) {
+            Callee = dyn_cast<Function>(Target.getGlobal());
+            FoundSource =
+                Callee &&
+                llvm::any_of(instructions(F), [&](const Instruction &I) {
+                  auto *Call = dyn_cast<GCStatepointInst>(&I);
+                  return Call && Call->getID() == Ops.getID() &&
+                         Call->getActualCalledFunction() == Callee;
+                });
+          }
+        } else {
+          for (const MachineOperand &MO : MI.operands())
+            if (MO.isGlobal())
+              if (auto *Target = dyn_cast<Function>(MO.getGlobal())) {
+                if (Callee && Callee != Target) {
+                  Callee = nullptr;
+                  break;
+                }
+                Callee = Target;
+              }
+          const auto &Calls = MF.getCallSitesInfo();
+          auto Source = Calls.find(&MI);
+          FoundSource = Callee && Source != Calls.end() &&
+                        Source->second.CallTarget == Callee->getSubprogram();
+        }
+        // An unknown/writing call invalidates prior defined-byte proof before
+        // any source-proven return postcondition is added. captures(none) is
+        // not noalias: only the qualified fresh-local assumption excludes
+        // access through other/global memory. ArgMem writes remain clobbers.
+        MemoryEffects Effects =
+            Callee ? Callee->getMemoryEffects() : MemoryEffects::unknown();
+        if (!Effects.onlyReadsMemory() &&
+            !(OtherMemDisjoint &&
+              !isModSet(Effects.getModRef(IRMemLocation::ArgMem))))
+          S.Bytes.clear();
+        const DISubprogram *CalleeSP =
+            Callee ? Callee->getSubprogram() : nullptr;
+        if (!TII.isTailCall(MI) && FoundSource && Callee &&
+            !Callee->isDeclaration() && CalleeSP && CalleeSP->getUnit() &&
+            CalleeSP->getUnit()->getSourceLanguage().getName() ==
+                dwarf::DW_LANG_Go &&
+            (Callee->getCallingConv() == CallingConv::ROG ||
+             Callee->getCallingConv() == CallingConv::ROG_Cold)) {
+          auto Writes = CallWrites.find(Callee);
+          if (Writes != CallWrites.end())
+            for (auto [Begin, Limit] : Writes->second)
+              addROGWrittenBytes(S.Bytes, Begin, Limit);
+        }
+        return;
+      }
+      if (MI.mayStore() && MI.memoperands_empty()) {
+        S.Bytes.clear();
+        return;
+      }
+      for (const MachineMemOperand *MMO : MI.memoperands()) {
+        if (!MMO->isStore())
+          continue;
+        if (const PseudoSourceValue *PSV = MMO->getPseudoValue())
+          if (!PSV->mayAlias(&MF.getFrameInfo()))
+            continue;
+        if (!MMO->getValue()) {
+          S.Bytes.clear();
+          continue;
+        }
+        int64_t StoreOffset = 0;
+        const Value *Base =
+            GetPointerBaseWithConstantOffset(MMO->getValue(), StoreOffset, DL);
+        if (Base != Object) {
+          const Value *Underlying = getUnderlyingObject(Base);
+          // Distinct allocas are disjoint. Globals are also disjoint from a
+          // local object (or the conditional fresh caller-local argument).
+          if ((isa<AllocaInst>(Underlying) && Underlying != Object) ||
+              (isa<GlobalVariable>(Underlying) && OtherMemDisjoint))
+            continue;
+          S.Bytes.clear();
+          continue;
+        }
+        int64_t MMOOffset = MMO->getOffset();
+        if (!MMO->getSize().hasValue() || MMO->getSize().isScalable() ||
+            (MMOOffset > 0 && StoreOffset > INT64_MAX - MMOOffset) ||
+            (MMOOffset < 0 && StoreOffset < INT64_MIN - MMOOffset)) {
+          S.Bytes.clear();
+          continue;
+        }
+        StoreOffset += MMOOffset;
+        uint64_t StoreSize = MMO->getSize().getValue().getFixedValue();
+        if (StoreOffset < 0 || StoreSize > uint64_t(INT64_MAX - StoreOffset)) {
+          S.Bytes.clear();
+          continue;
+        }
+        int64_t Begin = std::max(Offset, StoreOffset);
+        int64_t Limit = std::min(End, StoreOffset + int64_t(StoreSize));
+        if (Begin >= Limit)
+          continue;
+        auto [SourceIt, New] =
+            StoreSourceCache.try_emplace({Object, {Begin, Limit}}, false);
+        if (New)
+          SourceIt->second = rogStoreHasDefinedSource(F, Object, Begin, Limit);
+        if (isROGCompleteStore(MI, TII) && SourceIt->second)
+          addROGWrittenBytes(S.Bytes, Begin, Limit);
+        else
+          removeROGWrittenBytes(S.Bytes, Begin, Limit);
+      }
+    };
+    auto StateValue = [&](const RangeState &S) {
+      if (!S.Active)
+        return 2;
+      return int(S.Bytes.size() == 1 && S.Bytes[0].first == Offset &&
+                 S.Bytes[0].second == End);
+    };
+    DenseMap<const MachineBasicBlock *, RangeState> Inputs, Outputs;
+    bool Changed;
+    do {
+      Changed = false;
+      for (const auto &MBB : MF) {
+        RangeState S;
+        bool FirstPredecessor = true;
+        for (const auto *Pred : MBB.predecessors()) {
+          const auto &Previous = Outputs[Pred];
+          // Inactive paths carry no proof of a write. Ignoring them could
+          // emit state 1 at a join and incorrectly override a caller's state 0
+          // along a path where this function never wrote the memory.
+          if (FirstPredecessor)
+            S.Bytes = Previous.Bytes;
+          else
+            S.Bytes = intersectROGWrittenBytes(S.Bytes, Previous.Bytes);
+          S.Active |= Previous.Active;
+          FirstPredecessor = false;
+        }
+        // If optimization discarded the event anchor, losing its location must
+        // not silently disable the descriptor.
+        if (!HasInvalidLabel)
+          S.Active = true;
+        Inputs[&MBB] = S;
+        for (const auto &MI : MBB)
+          Transfer(MI, S);
+        if (Outputs[&MBB] != S) {
+          Outputs[&MBB] = std::move(S);
+          Changed = true;
+        }
+      }
+    } while (Changed);
+
+    auto EmitState = [&](MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator Where, int Value) {
+      BuildMI(MBB, Where, DebugLoc(D.Loc), TII.get(TargetOpcode::DBG_VALUE))
+          .addImm(Value)
+          .addReg(0)
+          .addMetadata(State)
+          .addMetadata(DIExpression::get(F.getContext(), {}));
+    };
+    for (auto &MBB : MF) {
+      RangeState S = Inputs[&MBB];
+      EmitState(MBB, MBB.begin(), StateValue(S));
+      for (MachineInstr &MI : make_early_inc_range(MBB)) {
+        int Before = StateValue(S);
+        Transfer(MI, S);
+        int After = StateValue(S);
+        if (Before != After)
+          EmitState(MBB, std::next(MI.getIterator()), After);
+      }
+    }
+  }
+}
+
 void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   this->MF = &MF;
+  finalizeROGMemoryAvailability(MF);
   const Function &F = MF.getFunction();
 
   // Record that there are split-stack functions, so we will emit a special

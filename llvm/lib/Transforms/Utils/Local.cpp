@@ -1848,6 +1848,10 @@ bool llvm::LowerDbgDeclare(Function &F) {
     return Changed;
 
   auto LowerOne = [&](DbgVariableRecord *DDI) {
+    // An implicit expression describes a value computed from the allocation
+    // address. Replacing that address with a stored pointee value is invalid.
+    if (DDI->getExpression()->isImplicit())
+      return;
     AllocaInst *AI =
         dyn_cast_or_null<AllocaInst>(DDI->getVariableLocationOp(0));
     // If this is an alloca for a scalar variable, insert a dbg.value

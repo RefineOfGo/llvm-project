@@ -52,6 +52,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/AttributeMask.h"
 #include "llvm/IR/BasicBlock.h"
@@ -2017,6 +2018,217 @@ std::optional<MemoryAccess *> DSEState::getDomMemoryDef(
   return {MaybeDeadAccess};
 }
 
+// Preserve the fact that optimized-away stack writes did not initialize their
+// source bytes in the executable. The assembly printer ends this unavailable
+// interval only after surviving machine stores have actually written the range.
+static void recordROGUnavailableStore(StoreInst &SI) {
+  Function &F = *SI.getFunction();
+  DISubprogram *SP = F.getSubprogram();
+  if (!SP || !SP->getUnit() ||
+      SP->getUnit()->getEmissionKind() != DICompileUnit::FullDebug ||
+      SP->getUnit()->getSourceLanguage().getName() != dwarf::DW_LANG_Go ||
+      (F.getCallingConv() != CallingConv::ROG &&
+       F.getCallingConv() != CallingConv::ROG_Cold))
+    return;
+
+  const DataLayout &DL = F.getDataLayout();
+  int64_t Offset = 0;
+  auto *AI = dyn_cast<AllocaInst>(
+      GetPointerBaseWithConstantOffset(SI.getPointerOperand(), Offset, DL));
+  TypeSize Size = DL.getTypeStoreSize(SI.getValueOperand()->getType());
+  if (!AI || !AI->isStaticAlloca() || Offset < 0 || Size.isScalable() ||
+      !Size.getFixedValue() ||
+      Size.getFixedValue() > uint64_t(INT64_MAX - Offset))
+    return;
+  std::optional<TypeSize> ObjectSize = AI->getAllocationSize(DL);
+  if (!ObjectSize || ObjectSize->isScalable() ||
+      uint64_t(Offset) > ObjectSize->getFixedValue() ||
+      Size.getFixedValue() > ObjectSize->getFixedValue() - uint64_t(Offset))
+    return;
+
+  LLVMContext &Ctx = F.getContext();
+  SmallVector<uint64_t, 3> AddressOps;
+  DIExpression::appendOffset(AddressOps, Offset);
+  AddressOps.push_back(dwarf::DW_OP_stack_value);
+  auto *AddressExpr = DIExpression::get(Ctx, AddressOps);
+  DILocalVariable *AddressVar = nullptr;
+  DILocalVariable *StateVar = nullptr;
+  std::string SizeText = std::to_string(Size.getFixedValue());
+  // Repeated DSE runs reuse one descriptor for an identical object/range.
+  // Only the event labels grow with the number of removed source writes.
+  for (Instruction &I : F.getEntryBlock())
+    for (DbgRecord &DR : I.getDbgRecordRange()) {
+      auto *DVR = dyn_cast<DbgVariableRecord>(&DR);
+      if (!DVR || !DVR->isDbgDeclare() || DVR->getVariableLocationOp(0) != AI ||
+          DVR->getExpression() != AddressExpr)
+        continue;
+      auto Annotations = DVR->getVariable()->getAnnotations();
+      if (!Annotations)
+        continue;
+      for (const MDOperand &Op : Annotations->operands()) {
+        auto *Pair = dyn_cast_or_null<MDNode>(Op);
+        if (!Pair || Pair->getNumOperands() != 2)
+          continue;
+        auto *Key = dyn_cast_or_null<MDString>(Pair->getOperand(0));
+        auto *Value = dyn_cast_or_null<MDString>(Pair->getOperand(1));
+        if (Key && Value && Key->getString() == "ROGMemoryUnavailable" &&
+            Value->getString() == SizeText)
+          AddressVar = DVR->getVariable();
+      }
+    }
+  if (AddressVar)
+    for (MDNode *Node : SP->getRetainedNodes())
+      if (auto *Var = dyn_cast<DILocalVariable>(Node))
+        if (Var->getName() == (AddressVar->getName() + ".state").str())
+          StateVar = Var;
+  std::string Name =
+      AddressVar && StateVar
+          ? AddressVar->getName().str()
+          : "__rog_memory_" + std::to_string(SP->getRetainedNodes().size());
+  auto Annotation = [&](StringRef Key, StringRef Value) {
+    Metadata *Pair[] = {MDString::get(Ctx, Key), MDString::get(Ctx, Value)};
+    Metadata *Values[] = {MDTuple::get(Ctx, Pair)};
+    return DINodeArray(MDTuple::get(Ctx, Values));
+  };
+  auto *AddressTy = DIBasicType::get(Ctx, dwarf::DW_TAG_base_type, "uintptr",
+                                     DL.getPointerSizeInBits(), 0,
+                                     dwarf::DW_ATE_unsigned, DINode::FlagZero);
+  auto *StateTy = DIBasicType::get(Ctx, dwarf::DW_TAG_base_type, "uint8", 8, 0,
+                                   dwarf::DW_ATE_unsigned, DINode::FlagZero);
+  bool NewRange = !AddressVar || !StateVar;
+  if (NewRange) {
+    AddressVar = DILocalVariable::getDistinct(
+        Ctx, SP, Name, SP->getFile(), 0, AddressTy, 0, DINode::FlagArtificial,
+        0,
+        Annotation("ROGMemoryUnavailable",
+                   std::to_string(Size.getFixedValue())));
+    StateVar = DILocalVariable::getDistinct(
+        Ctx, SP, Name + ".state", SP->getFile(), 0, StateTy, 0,
+        DINode::FlagArtificial, 0, Annotation("ROGMemoryState", Name));
+    Metadata *Retained[] = {AddressVar, StateVar};
+    SP->retainNodes(std::begin(Retained), std::end(Retained));
+  }
+  auto *InvalidLabel = DILabel::getDistinct(
+      Ctx, SP,
+      Name + ".invalid." + std::to_string(SP->getRetainedNodes().size()),
+      SP->getFile(), 0, 0, true, std::nullopt);
+  Metadata *RetainedLabel[] = {InvalidLabel};
+  SP->retainNodes(std::begin(RetainedLabel), std::end(RetainedLabel));
+  auto *Loc = DILocation::get(Ctx, 0, 0, SP);
+  // One address declaration suffices even when the range is invalidated again.
+  if (NewRange) {
+    auto *Address =
+        DbgVariableRecord::createDVRDeclare(AI, AddressVar, AddressExpr, Loc);
+    F.getEntryBlock().insertDbgRecordBefore(
+        Address, F.getEntryBlock().getFirstInsertionPt());
+    for (Instruction &I : instructions(F)) {
+      auto *II = dyn_cast<IntrinsicInst>(&I);
+      if (!II || II->getIntrinsicID() != Intrinsic::lifetime_end ||
+          getUnderlyingObject(II->getArgOperand(II->arg_size() - 1)) != AI)
+        continue;
+      auto *EndLabel = DILabel::getDistinct(
+          Ctx, SP,
+          Name + ".end." + std::to_string(SP->getRetainedNodes().size()),
+          SP->getFile(), 0, 0, true, std::nullopt);
+      Metadata *RetainedEnd[] = {EndLabel};
+      SP->retainNodes(std::begin(RetainedEnd), std::end(RetainedEnd));
+      I.getParent()->insertDbgRecordBefore(
+          new DbgLabelRecord(EndLabel, DebugLoc(Loc)), I.getIterator());
+    }
+  }
+  auto *State = DbgVariableRecord::createDbgVariableRecord(
+      ConstantInt::get(Type::getInt8Ty(Ctx), 0), StateVar,
+      DIExpression::get(Ctx, {}), Loc);
+  SI.getParent()->insertDbgRecordBefore(State, SI.getIterator());
+  SI.getParent()->insertDbgRecordBefore(
+      new DbgLabelRecord(InvalidLabel, DebugLoc(Loc)), SI.getIterator());
+}
+
+// Positive-only descriptors allow a real callee write to override an older
+// caller invalidation. Only the emitted machine store proves initialization;
+// inferred argument attributes can appear after this pass and are not used.
+static bool recordROGAvailableStores(Function &F) {
+  DISubprogram *SP = F.getSubprogram();
+  if (!SP || !SP->getUnit() ||
+      SP->getUnit()->getEmissionKind() != DICompileUnit::FullDebug ||
+      SP->getUnit()->getSourceLanguage().getName() != dwarf::DW_LANG_Go ||
+      (F.getCallingConv() != CallingConv::ROG &&
+       F.getCallingConv() != CallingConv::ROG_Cold))
+    return false;
+  LLVMContext &Ctx = F.getContext();
+  const DataLayout &DL = F.getDataLayout();
+  bool Changed = false;
+  for (Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    int64_t Offset = 0;
+    auto *Arg = dyn_cast<Argument>(
+        GetPointerBaseWithConstantOffset(SI->getPointerOperand(), Offset, DL));
+    TypeSize Size = DL.getTypeStoreSize(SI->getValueOperand()->getType());
+    if (!Arg || Offset < 0 || Size.isScalable() || !Size.getFixedValue() ||
+        !isGuaranteedNotToBeUndefOrPoison(SI->getValueOperand()) ||
+        Size.getFixedValue() > uint64_t(INT64_MAX - Offset))
+      continue;
+    std::string ArgText = std::to_string(Arg->getArgNo());
+    std::string OffsetText = std::to_string(Offset);
+    std::string SizeText = std::to_string(Size.getFixedValue());
+    auto HasAnnotation = [](const DILocalVariable &Var, StringRef Key,
+                            StringRef Value) {
+      if (auto Annotations = Var.getAnnotations())
+        for (const MDOperand &Operand : Annotations->operands())
+          if (auto *Pair = dyn_cast_or_null<MDNode>(Operand))
+            if (Pair->getNumOperands() == 2)
+              if (auto *K = dyn_cast_or_null<MDString>(Pair->getOperand(0)))
+                if (auto *V = dyn_cast_or_null<MDString>(Pair->getOperand(1)))
+                  if (K->getString() == Key && V->getString() == Value)
+                    return true;
+      return false;
+    };
+    if (llvm::any_of(SP->getRetainedNodes(), [&](MDNode *Node) {
+          auto *Var = dyn_cast<DILocalVariable>(Node);
+          return Var && HasAnnotation(*Var, "ROGMemoryAvailable", SizeText) &&
+                 HasAnnotation(*Var, "ROGMemoryArgument", ArgText) &&
+                 HasAnnotation(*Var, "ROGMemoryOffset", OffsetText);
+        }))
+      continue;
+    auto Pair = [&](StringRef Key, StringRef Value) {
+      Metadata *Ops[] = {MDString::get(Ctx, Key), MDString::get(Ctx, Value)};
+      return MDTuple::get(Ctx, Ops);
+    };
+    std::string Name = "__rog_memory_available_" +
+                       std::to_string(SP->getRetainedNodes().size());
+    Metadata *AddressAnnotations[] = {Pair("ROGMemoryAvailable", SizeText),
+                                      Pair("ROGMemoryArgument", ArgText),
+                                      Pair("ROGMemoryOffset", OffsetText)};
+    auto *AddressTy = DIBasicType::get(
+        Ctx, dwarf::DW_TAG_base_type, "uintptr", DL.getPointerSizeInBits(), 0,
+        dwarf::DW_ATE_unsigned, DINode::FlagZero);
+    auto *StateTy =
+        DIBasicType::get(Ctx, dwarf::DW_TAG_base_type, "uint8", 8, 0,
+                         dwarf::DW_ATE_unsigned, DINode::FlagZero);
+    auto *AddressVar = DILocalVariable::getDistinct(
+        Ctx, SP, Name, SP->getFile(), 0, AddressTy, 0, DINode::FlagArtificial,
+        0, DINodeArray(MDTuple::get(Ctx, AddressAnnotations)));
+    Metadata *StateAnnotations[] = {Pair("ROGMemoryState", Name)};
+    auto *StateVar = DILocalVariable::getDistinct(
+        Ctx, SP, Name + ".state", SP->getFile(), 0, StateTy, 0,
+        DINode::FlagArtificial, 0,
+        DINodeArray(MDTuple::get(Ctx, StateAnnotations)));
+    Metadata *Retained[] = {AddressVar, StateVar};
+    SP->retainNodes(std::begin(Retained), std::end(Retained));
+    SmallVector<uint64_t, 3> Ops;
+    DIExpression::appendOffset(Ops, Offset);
+    auto *Address = DbgVariableRecord::createDbgVariableRecord(
+        Arg, AddressVar, DIExpression::get(Ctx, Ops),
+        DILocation::get(Ctx, 0, 0, SP));
+    F.getEntryBlock().insertDbgRecordBefore(
+        Address, F.getEntryBlock().getFirstInsertionPt());
+    Changed = true;
+  }
+  return Changed;
+}
+
 void DSEState::deleteDeadInstruction(Instruction *SI,
                                      SmallPtrSetImpl<MemoryAccess *> *Deleted) {
   MemorySSAUpdater Updater(&MSSA);
@@ -2027,6 +2239,9 @@ void DSEState::deleteDeadInstruction(Instruction *SI,
   while (!NowDeadInsts.empty()) {
     Instruction *DeadInst = NowDeadInsts.pop_back_val();
     ++NumFastOther;
+
+    if (auto *Store = dyn_cast<StoreInst>(DeadInst))
+      recordROGUnavailableStore(*Store);
 
     // Try to preserve debug information attached to the dead instruction.
     salvageDebugInfo(*DeadInst);
@@ -2824,6 +3039,7 @@ PreservedAnalyses DSEPass::run(Function &F, FunctionAnalysisManager &AM) {
   CycleInfo &CI = AM.getResult<CycleAnalysis>(F);
 
   bool Changed = eliminateDeadStores(F, AA, MSSA, DT, PDT, TLI, CI);
+  Changed |= recordROGAvailableStores(F);
 
 #ifdef LLVM_ENABLE_STATS
   if (AreStatisticsEnabled())
@@ -2865,6 +3081,7 @@ public:
     CycleInfo &CI = getAnalysis<CycleInfoWrapperPass>().getResult();
 
     bool Changed = eliminateDeadStores(F, AA, MSSA, DT, PDT, TLI, CI);
+    Changed |= recordROGAvailableStores(F);
 
 #ifdef LLVM_ENABLE_STATS
     if (AreStatisticsEnabled())

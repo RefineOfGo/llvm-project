@@ -990,8 +990,8 @@ MachineFunction::getCallSiteInfo(const MachineInstr *MI) {
   assert(MI->isCandidateForAdditionalCallInfo() &&
          "Call site info refers only to call (MI) candidates");
 
-  if (!Target.Options.EmitCallSiteInfo && !Target.Options.EmitCallGraphSection)
-    return CallSitesInfo.end();
+  // ROG source-call provenance may be retained independently of optional
+  // call-site parameter emission; cloning and erasure must maintain it too.
   return CallSitesInfo.find(MI);
 }
 

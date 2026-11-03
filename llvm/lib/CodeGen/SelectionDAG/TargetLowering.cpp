@@ -14,6 +14,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/VectorUtils.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/CodeGenCommonISel.h"
@@ -14349,4 +14350,21 @@ void TargetLowering::setTypeIdForCallsiteInfo(
       (MF.getTarget().Options.EmitCallGraphSection ||
        MF.getTarget().Options.EmitCallSiteInfo))
     CSInfo = MachineFunction::CallSiteInfo(*CB);
+  // Keep source-call provenance for ROG memory initialization proofs even when
+  // optional call-site parameter emission is disabled. Backend libcalls have
+  // no CallBase and must never acquire this provenance.
+  const Function &Caller = MF.getFunction();
+  DISubprogram *CallerSP = Caller.getSubprogram();
+  if (CB && !CB->isIndirectCall() && CallerSP && CallerSP->getUnit() &&
+      CallerSP->getUnit()->getSourceLanguage().getName() == dwarf::DW_LANG_Go &&
+      (Caller.getCallingConv() == CallingConv::ROG ||
+       Caller.getCallingConv() == CallingConv::ROG_Cold))
+    if (const Function *Callee = CB->getCalledFunction()) {
+      DISubprogram *SP = Callee->getSubprogram();
+      if (!Callee->isDeclaration() && SP && SP->getUnit() &&
+          SP->getUnit()->getSourceLanguage().getName() == dwarf::DW_LANG_Go &&
+          (Callee->getCallingConv() == CallingConv::ROG ||
+           Callee->getCallingConv() == CallingConv::ROG_Cold))
+        CSInfo.CallTarget = SP;
+    }
 }

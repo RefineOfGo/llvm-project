@@ -80,6 +80,52 @@ merge:
   ret void
 }
 
+; The common bytes are [4,8) and [36,40), even though the middle intervals
+; merely touch and the last intervals have equal end points. Preserve both
+; fragments: filling only their complement must restore the entire object.
+; CHECK-LABEL: fragmented_join:
+; CHECK: #DEBUG_VALUE: fragmented_join:range.state <- 0
+; CHECK: # %merge
+; CHECK-NOT: range.state <- 1
+; CHECK: callq checkpoint
+; CHECK-NOT: range.state <- 1
+; CHECK: movl $99,
+; CHECK: #DEBUG_VALUE: fragmented_join:range.state <- 1
+; CHECK: callq consume
+define rogcc void @fragmented_join(i1 %condition) !dbg !410 {
+entry:
+  %p = alloca [40 x i8], align 8
+    #dbg_declare(ptr %p, !411, !DIExpression(DW_OP_stack_value), !413)
+    #dbg_value(i8 0, !412, !DIExpression(), !413)
+    #dbg_label(!414, !413)
+  %p4 = getelementptr i8, ptr %p, i64 4
+  %p8 = getelementptr i8, ptr %p, i64 8
+  %p16 = getelementptr i8, ptr %p, i64 16
+  %p24 = getelementptr i8, ptr %p, i64 24
+  %p32 = getelementptr i8, ptr %p, i64 32
+  %p36 = getelementptr i8, ptr %p, i64 36
+  br i1 %condition, label %left, label %right
+left:
+  store i64 21, ptr %p, align 8, !dbg !413
+  store i64 22, ptr %p16, align 8, !dbg !413
+  store i64 23, ptr %p32, align 8, !dbg !413
+  br label %merge
+right:
+  store i64 31, ptr %p4, align 4, !dbg !413
+  store i32 32, ptr %p24, align 8, !dbg !413
+  store i32 33, ptr %p36, align 4, !dbg !413
+  br label %merge
+merge:
+  call void @checkpoint(), !dbg !413
+  store i32 41, ptr %p, align 8, !dbg !413
+  store i64 42, ptr %p8, align 8, !dbg !413
+  store i64 43, ptr %p16, align 8, !dbg !413
+  store i64 44, ptr %p24, align 8, !dbg !413
+  store i32 99, ptr %p32, align 8, !dbg !413
+  call void @consume(ptr %p), !dbg !413
+  ret void
+}
+
 ; Inactive descriptors must not restrict another object reusing the stack slot,
 ; and must not act as proof that a caller's unavailable bytes were initialized.
 ; CHECK-LABEL: lifetime:
@@ -863,3 +909,14 @@ declare void @consume(ptr captures(none)) memory(argmem: read)
 !402 = distinct !DILocalVariable(name: "range.state", scope: !400, file: !1, type: !10, flags: DIFlagArtificial, annotations: !33)
 !403 = !DILocation(line: 400, column: 1, scope: !400)
 !404 = distinct !DILabel(scope: !400, name: "range.invalid.0", file: !1, line: 0, isArtificial: true)
+!410 = distinct !DISubprogram(name: "fragmented_join", scope: !1, file: !1, line: 410, type: !5, scopeLine: 410, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !{!411, !412, !414})
+!411 = distinct !DILocalVariable(name: "range", scope: !410, file: !1, type: !417, flags: DIFlagArtificial, annotations: !415)
+!412 = distinct !DILocalVariable(name: "range.state", scope: !410, file: !1, type: !10, flags: DIFlagArtificial, annotations: !33)
+!413 = !DILocation(line: 410, column: 1, scope: !410)
+!414 = distinct !DILabel(scope: !410, name: "range.invalid.0", file: !1, line: 0, isArtificial: true)
+!415 = !{!416}
+!416 = !{!"ROGMemoryUnavailable", !"40"}
+!417 = !DICompositeType(tag: DW_TAG_array_type, baseType: !418, size: 320, elements: !419)
+!418 = !DIBasicType(name: "byte", size: 8, encoding: DW_ATE_unsigned)
+!419 = !{!420}
+!420 = !DISubrange(count: 40)

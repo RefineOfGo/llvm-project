@@ -3238,10 +3238,21 @@ static void removeROGWrittenBytes(ROGWrittenBytes &Bytes, int64_t Begin,
 static ROGWrittenBytes intersectROGWrittenBytes(const ROGWrittenBytes &A,
                                                 const ROGWrittenBytes &B) {
   ROGWrittenBytes Result;
-  for (auto X : A)
-    for (auto Y : B)
-      addROGWrittenBytes(Result, std::max(X.first, Y.first),
-                         std::min(X.second, Y.second));
+  auto X = A.begin(), Y = B.begin();
+  // Inputs merge overlapping and adjacent intervals, so the nonempty
+  // intersections are already sorted and disjoint without normalization.
+  while (X != A.end() && Y != B.end()) {
+    const auto [XBegin, XEnd] = *X;
+    const auto [YBegin, YEnd] = *Y;
+    int64_t Begin = std::max(XBegin, YBegin);
+    int64_t End = std::min(XEnd, YEnd);
+    if (Begin < End)
+      Result.emplace_back(Begin, End);
+    if (XEnd <= YEnd)
+      ++X;
+    if (YEnd <= XEnd)
+      ++Y;
+  }
   return Result;
 }
 

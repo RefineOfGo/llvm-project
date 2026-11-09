@@ -17,7 +17,9 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugProgramInstruction.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/CommandLine.h"
@@ -292,6 +294,42 @@ void DebugHandlerBase::beginFunction(const MachineFunction *MF) {
     DbgValues.trimLocationRanges(*MF, LScopes, InstOrdering);
   LLVM_DEBUG(DbgValues.dump(MF->getName()));
 
+  // Only an IR entry record can establish a parameter's incoming constant.
+  // A first surviving machine location can instead be a later assignment when
+  // an earlier unavailable location has been removed.
+  DenseMap<std::pair<const DILocalVariable *, const DIExpression *>,
+           const Value *>
+      EntryValues;
+  for (const DbgRecord &DR :
+       MF->getFunction().getEntryBlock().front().getDbgRecordRange())
+    if (const auto *DVR = dyn_cast<DbgVariableRecord>(&DR))
+      if (DVR->isDbgValue() && DVR->getVariable()->isParameter() &&
+          DVR->getNumVariableLocationOps() == 1 &&
+          !DVR->getDebugLoc().getInlinedAt() &&
+          getDISubprogram(DVR->getVariable()->getScope())
+              ->describes(&MF->getFunction()))
+        EntryValues[{DVR->getVariable(), DVR->getExpression()}] =
+            DVR->getVariableLocationOp(0);
+
+  auto DescribesEntryValue = [&](const MachineInstr *MI) {
+    if (MI->getNumDebugOperands() != 1)
+      return false;
+    const Value *V =
+        EntryValues.lookup({MI->getDebugVariable(), MI->getDebugExpression()});
+    const MachineOperand &MO = MI->getDebugOperand(0);
+    if (const auto *CI = dyn_cast_or_null<ConstantInt>(V)) {
+      if (MO.isCImm())
+        return MO.getCImm() == CI;
+      return MO.isImm() && CI->getValue().isSignedIntN(64) &&
+             MO.getImm() == CI->getSExtValue();
+    }
+    if (const auto *CFP = dyn_cast_or_null<ConstantFP>(V))
+      return MO.isFPImm() && MO.getFPImm() == CFP;
+    if (isa_and_nonnull<ConstantPointerNull>(V))
+      return MO.isImm() && MO.getImm() == 0;
+    return false;
+  };
+
   // Request labels for the full history.
   for (const auto &I : DbgValues) {
     const auto &Entries = I.second;
@@ -303,20 +341,14 @@ void DebugHandlerBase::beginFunction(const MachineFunction *MF) {
                     [](auto &MO) { return MO.isReg() && MO.getReg(); });
     };
 
-    // The first mention of a function argument gets the CurrentFnBegin label,
-    // so arguments are visible when breaking at function entry.
-    //
-    // We do not change the label for values that are described by registers,
-    // as that could place them above their defining instructions. We should
-    // ideally not change the labels for constant debug values either, since
-    // doing that violates the ranges that are calculated in the history map.
-    // However, we currently do not emit debug values for constant arguments
-    // directly at the start of the function, so this code is still useful.
+    // Recover entry coverage lost when lowering an actual incoming constant
+    // past the prologue. Otherwise preserve the history's exact start: even a
+    // parameter's first location may describe a later assignment.
     const DILocalVariable *DIVar =
         Entries.front().getInstr()->getDebugVariable();
     if (DIVar->isParameter() &&
         getDISubprogram(DIVar->getScope())->describes(&MF->getFunction())) {
-      if (!IsDescribedByReg(Entries.front().getInstr()))
+      if (DescribesEntryValue(Entries.front().getInstr()))
         LabelsBeforeInsn[Entries.front().getInstr()] = Asm->getFunctionBegin();
       if (Entries.front().getInstr()->getDebugExpression()->isFragment()) {
         // Mark all non-overlapping initial fragments.
@@ -335,7 +367,8 @@ void DebugHandlerBase::beginFunction(const MachineFunction *MF) {
           // entries' start labels are monotonically increasing, and since we
           // don't change the label for fragments that are described by
           // registers, we must bail out when encountering such a fragment.
-          if (IsDescribedByReg(I->getInstr()))
+          if (IsDescribedByReg(I->getInstr()) ||
+              !DescribesEntryValue(I->getInstr()))
             break;
           LabelsBeforeInsn[I->getInstr()] = Asm->getFunctionBegin();
         }

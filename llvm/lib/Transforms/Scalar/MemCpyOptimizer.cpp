@@ -1090,6 +1090,22 @@ bool MemCpyOptPass::performCallSlotOptzn(Instruction *cpyLoad,
                       MSSA->getMemoryAccess(C));
   }
 
+  if (auto *MemSet = dyn_cast<MemSetInst>(C)) {
+    if (auto *MemCpy = dyn_cast<MemCpyInst>(cpyStore)) {
+      // Retargeting removes the source write. Leave its debug assignments
+      // unlinked, and preserve the destination link only for an equal range.
+      // A shared ID cannot be reused without also relinking source markers.
+      MDNode *SrcAssignID = MemSet->getMetadata(LLVMContext::MD_DIAssignID);
+      MDNode *DstAssignID = MemCpy->getMetadata(LLVMContext::MD_DIAssignID);
+      MDNode *NewAssignID = nullptr;
+      if (MemSet->getRawDest() == MemCpy->getRawDest() &&
+          MemSet->getLength() == MemCpy->getLength() &&
+          SrcAssignID != DstAssignID)
+        NewAssignID = DstAssignID;
+      MemSet->setMetadata(LLVMContext::MD_DIAssignID, NewAssignID);
+    }
+  }
+
   combineAAMetadata(C, cpyLoad);
   if (cpyLoad != cpyStore)
     combineAAMetadata(C, cpyStore);
@@ -1498,6 +1514,11 @@ bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
 
   Instruction *NewM =
       Builder.CreateMemSet(DestPtr, MemSet->getOperand(1), CopySize, Align);
+  // Preserve the assignment link only when the replacement writes the same
+  // bytes. Shortened or shifted writes need fragment-aware debug updates.
+  if (DestPtr == MemCpy->getRawDest() && CopySize == MemCpy->getLength())
+    NewM->copyMetadata(*MemCpy, LLVMContext::MD_DIAssignID);
+
   auto *LastDef = cast<MemoryDef>(MSSA->getMemoryAccess(MemCpy));
   auto *NewAccess = MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);
   MSSAU->insertDef(cast<MemoryDef>(NewAccess), /*RenameUses=*/true);
@@ -1834,6 +1855,7 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
         IRBuilder<> Builder(M);
         Instruction *NewM = Builder.CreateMemSet(
             M->getRawDest(), ByteVal, M->getLength(), M->getDestAlign(), false);
+        NewM->copyMetadata(*M, LLVMContext::MD_DIAssignID);
         auto *LastDef = cast<MemoryDef>(MA);
         auto *NewAccess =
             MSSAU->createMemoryAccessAfter(NewM, nullptr, LastDef);

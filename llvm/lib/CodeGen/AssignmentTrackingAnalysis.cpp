@@ -28,6 +28,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PrintPasses.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -2270,25 +2271,38 @@ static AssignmentTrackingLowering::OverlapMap buildOverlapMapAndRecordDeclares(
       if (!CB)
         continue;
 
-      // Skip intrinsics.  Their memory effects are modeled individually.
-      if (isa<IntrinsicInst>(CB))
+      // A statepoint wraps a call whose actual arguments can escape, unlike
+      // its deopt and GC operands. Other intrinsics are modeled individually.
+      auto *Statepoint = dyn_cast<GCStatepointInst>(CB);
+      if (isa<IntrinsicInst>(CB) && !Statepoint)
         continue;
 
       // Skip calls that cannot write to memory at all.
-      if (CB->onlyReadsMemory())
+      const Function *Callee =
+          Statepoint ? Statepoint->getActualCalledFunction() : nullptr;
+      if (CB->onlyReadsMemory() || (Callee && Callee->onlyReadsMemory()))
         continue;
 
+      unsigned ArgBegin = Statepoint ? GCStatepointInst::CallArgsBeginPos : 0;
+      unsigned ArgEnd = ArgBegin + (Statepoint ? Statepoint->actual_arg_size()
+                                               : CB->arg_size());
       SmallDenseSet<VariableID, 4> SeenVars;
-      for (unsigned ArgIdx = 0; ArgIdx < CB->arg_size(); ++ArgIdx) {
+      for (unsigned ArgIdx = ArgBegin; ArgIdx < ArgEnd; ++ArgIdx) {
         Value *Arg = CB->getArgOperand(ArgIdx);
         if (!Arg->getType()->isPointerTy())
           continue;
+        // Statepoint parameter attributes use the intrinsic's argument
+        // positions. Attributes on its actual callee use the original ones.
+        auto ParamHasAttr = [&](Attribute::AttrKind Kind) {
+          return CB->paramHasAttr(ArgIdx, Kind) ||
+                 (Callee && Callee->hasParamAttribute(ArgIdx - ArgBegin, Kind));
+        };
         // Skip args the callee cannot write through.
-        if (CB->paramHasAttr(ArgIdx, Attribute::ReadOnly) ||
-            CB->paramHasAttr(ArgIdx, Attribute::ReadNone))
+        if (ParamHasAttr(Attribute::ReadOnly) ||
+            ParamHasAttr(Attribute::ReadNone))
           continue;
         // Skip byval args.  The callee gets a copy, not the original.
-        if (CB->paramHasAttr(ArgIdx, Attribute::ByVal))
+        if (ParamHasAttr(Attribute::ByVal))
           continue;
 
         auto *AI = dyn_cast<AllocaInst>(getUnderlyingObject(Arg));

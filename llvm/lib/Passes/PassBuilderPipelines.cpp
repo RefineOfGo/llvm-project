@@ -72,6 +72,7 @@
 #include "llvm/Transforms/IPO/ModuleInliner.h"
 #include "llvm/Transforms/IPO/OpenMPOpt.h"
 #include "llvm/Transforms/IPO/PartialInlining.h"
+#include "llvm/Transforms/IPO/RogPreparePseudoProbes.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/SampleProfile.h"
 #include "llvm/Transforms/IPO/SampleProfileProbe.h"
@@ -196,6 +197,10 @@ static cl::opt<bool> EnableEagerlyInvalidateAnalyses(
 static cl::opt<bool> EnableMergeFunctions(
     "enable-merge-functions", cl::init(false), cl::Hidden,
     cl::desc("Enable function merging as part of the optimization pipeline"));
+
+static cl::opt<bool> RogPostoptPseudoProbe(
+    "rog-postopt-pseudo-probe", cl::init(false), cl::Hidden,
+    cl::desc("Insert ROG pseudo probes after pre-link optimization"));
 
 static cl::opt<bool> EnablePostPGOLoopRotation(
     "enable-post-pgo-loop-rotation", cl::init(true), cl::Hidden,
@@ -1892,8 +1897,19 @@ PassBuilder::buildFatLTODefaultPipeline(OptimizationLevel Level, bool ThinLTO,
 
 ModulePassManager
 PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
-  if (Level == OptimizationLevel::O0)
+  if (RogPostoptPseudoProbe &&
+      ((PGOOpt && (PGOOpt->PseudoProbeForProfiling ||
+                   PGOOpt->Action != PGOOptions::NoAction ||
+                   PGOOpt->CSAction != PGOOptions::NoCSAction)) ||
+       !UseCtxProfile.empty()))
+    report_fatal_error(
+        "ROG post-optimization probes cannot be combined with PGO");
+  if (Level == OptimizationLevel::O0) {
+    if (RogPostoptPseudoProbe)
+      report_fatal_error("ROG post-optimization probes require an optimized "
+                         "pre-link pipeline");
     return buildO0DefaultPipeline(Level, ThinOrFullLTOPhase::ThinLTOPreLink);
+  }
 
   ModulePassManager MPM;
 
@@ -1952,6 +1968,10 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   // Attach !implicit.ref metadata from all functions to copyright strings.
   MPM.addPass(LowerCommentStringPass());
 
+  if (RogPostoptPseudoProbe) {
+    MPM.addPass(RogPreparePseudoProbesPass());
+    MPM.addPass(SampleProfileProbePass(TM));
+  }
   addRequiredLTOPreLinkPasses(MPM);
 
   instructionCountersPass(MPM, /* IsPreOptimization */ false);

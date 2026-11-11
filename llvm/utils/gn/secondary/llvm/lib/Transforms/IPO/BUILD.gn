@@ -73,6 +73,7 @@ static_library("IPO") {
     "ModuleInliner.cpp",
     "OpenMPOpt.cpp",
     "PartialInlining.cpp",
+    "RogPreparePseudoProbes.cpp",
     "SCCP.cpp",
     "SampleContextTracker.cpp",
     "SampleProfile.cpp",

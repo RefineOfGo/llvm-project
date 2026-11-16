@@ -445,21 +445,12 @@ private:
   /// is empty (true for ROG's deopt-pointer maps).
   void serializeToStackMapSectionPerFunction();
 
-  /// ROG precise GC: emit one function's records as a compact dictionary blob
-  /// (version 0x54) instead of the v3 layout: distinct locations are interned
-  /// into a per-function slot dictionary, distinct live sets into a bitmap
-  /// table, and each record shrinks to (instruction offset, set index). See
-  /// the definition for the exact layout. `StartIdx` is the function's first
-  /// record in `CSInfos`.
+  /// Emit a version 0x55 function blob containing root and stack-object
+  /// dictionaries, independent root/object bitmap sets, and safepoint records.
+  /// See the definition for the exact layout. `StartIdx` is the function's
+  /// first record in `CSInfos`.
   void emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
                                const FunctionInfo &FnInfo, unsigned StartIdx);
-
-  /// ROG precise GC: emit one function's stack-object list into a separate
-  /// `.llvm_stackobjs` section. The runtime indexes this section by return PC
-  /// and uses it to rebuild the frame's stack-object interval list before
-  /// scanning precise roots.
-  void emitStackObjectBlob(MCStreamer &OS, const MCSymbol *FnSym,
-                           const FunctionInfo &FnInfo, unsigned StartIdx);
 
   LLVM_ABI void print(raw_ostream &OS);
   void debug() { print(dbgs()); }

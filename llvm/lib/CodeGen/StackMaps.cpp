@@ -37,7 +37,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <cstdlib>
 #include <iterator>
 #include <map>
 #include <utility>
@@ -885,18 +884,13 @@ void StackMaps::serializeToStackMapSection() {
 /// function's text (and placed in the function's comdat group, if any). The
 /// linker keeps each blob exactly when it keeps the function and merges the
 /// survivors into the final `.llvm_stackmaps`; the runtime reads it as the same
-/// concatenation of self-describing blobs as before. The caller guarantees an
-/// empty constant pool, so every blob emits NumConstants = 0.
+/// concatenation of self-describing blobs. The caller guarantees an empty
+/// constant pool, so no cross-function constant references need preserving.
 void StackMaps::serializeToStackMapSectionPerFunction() {
   MCContext &OutContext = AP.OutStreamer->getContext();
   MCStreamer &OS = *AP.OutStreamer;
 
   LLVM_DEBUG(dbgs() << "***** Stack Map Output (per-function) *****\n");
-
-  // ROG_STACKMAP_V3: diagnostic escape hatch — emit the uncompressed v3
-  // per-function blobs (llvm-readobj-compatible) instead of the compact
-  // dictionary format, e.g. for differential decoding of the two layouts.
-  const bool EmitV3 = std::getenv("ROG_STACKMAP_V3") != nullptr;
 
   // CSInfos is ordered by function in FnInfos order, RecordCount entries each;
   // walk both in lockstep.
@@ -920,40 +914,8 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
         /*IsComdat=*/Group != nullptr, MCSection::NonUniqueID, FnSymELF);
     OS.switchSection(Sec);
 
-    if (!EmitV3) {
-      emitCompactFunctionBlob(OS, FnSym, FnInfo, CSIdx);
-      emitStackObjectBlob(OS, FnSym, FnInfo, CSIdx);
-      CSIdx += FnInfo.RecordCount;
-      OS.addBlankLine();
-      continue;
-    }
-
-    // Self-describing header for a single function (no constants).
-    OS.emitIntValue(StackMapVersion, 1); // Version.
-    OS.emitIntValue(0, 1);               // Reserved.
-    OS.emitInt16(0);                     // Reserved.
-    OS.emitInt32(1);                     // Num Functions.
-    OS.emitInt32(0);                     // Num Constants.
-    OS.emitInt32(FnInfo.RecordCount);    // Num Records.
-
-    OS.AddComment("Function Address");
-    OS.emitSymbolValue(FnSym, 8);
-    OS.AddComment("  Stack Size");
-    OS.emitIntValue(FnInfo.StackSize, 8);
-    OS.AddComment("  Record Count");
-    OS.emitIntValue(FnInfo.RecordCount, 8);
-
-    // ROG extension: the callee-saved-register save area, as a [Lo, Hi) byte
-    // range relative to the frame pointer (the runtime scans it conservatively
-    // to recover GC pointers held in callee-saved registers across safepoints).
-    OS.AddComment("  CSR area Lo (rbp-relative)");
-    OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRLo), 4);
-    OS.AddComment("  CSR area Hi (rbp-relative)");
-    OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRHi), 4);
-
-    for (uint64_t I = 0; I < FnInfo.RecordCount; ++I, ++CSIdx)
-      emitCallsiteEntry(OS, CSInfos[CSIdx]);
-    emitStackObjectBlob(OS, FnSym, FnInfo, CSIdx - FnInfo.RecordCount);
+    emitCompactFunctionBlob(OS, FnSym, FnInfo, CSIdx);
+    CSIdx += FnInfo.RecordCount;
 
     OS.addBlankLine();
   }
@@ -961,70 +923,66 @@ void StackMaps::serializeToStackMapSectionPerFunction() {
          "per-function callsite count must cover all records");
 }
 
-/// ROG precise GC: compact per-function stack-map blob (version 0x54, 'T').
+/// ROG compact stackmap 0x55: each function owns its roots, stack objects,
+/// deduplicated root/object bitmaps, and safepoint records. The root projection
+/// preserves the old location order and values. Objects from per-PC Direct
+/// descriptors and the function table share a normalized scan-range encoding;
+/// their original offsets remain available for retention attribution.
 ///
-/// The v3 layout re-lists every live location at every record. Functions with
-/// many always-live slots and many safepoints (large generated package init
-/// functions: ~28k records x ~3k slots each) blow the section up to gigabytes,
-/// which pushes the final image past the ±2 GiB PC32 relocation range and, at
-/// runtime, costs a multi-GiB eager parse. Location lists at different records
-/// of one function draw from a small universe and are near-identical, so the
-/// blob factors the repetition out through two levels of sharing:
-///   - a slot dictionary of the distinct (kind, dwarf reg, offset, size|flags)
-///     locations, with each Direct's trailing size-annotation Constant already
-///     folded in (mirroring the runtime reader's v3 folding, including the
-///     clamp of negative annotations to 0);
-///   - a table of the distinct live sets, each a bitmap over the dictionary;
-///   - one 8-byte record per safepoint: instruction offset + set index, with
-///     bit 31 carrying the "incomplete" flag (bit 63 of the v3 patchpoint ID)
-///     and bit 30 carrying the "prologue-entry" flag (bit 62 of the ID; see
-///     kROGPrologueEntryStackMapID in ROGRuntimeSymbols.h).
-/// Locations within a record are order-insensitive for the runtime (each is an
-/// independent root read / stack-object registration), so sets are sorted and
-/// deduplicated. Leading statepoint-metadata Constants and LiveOuts are
-/// dropped, exactly as the v3 runtime reader drops them.
-///
-/// Version history: 0x52 gave the set index all 31 low bits of a record;
-/// 0x53 narrowed it to 30 to make room for the prologue-entry flag; 0x54
-/// switched the function address to PC-relative (see below). The
-/// runtime reader accepts both.
-///
-/// Layout (little-endian; every section is a multiple of 8 bytes so the
-/// linker's concatenation keeps each blob 8-aligned):
-///   u8 0x54, u8 0, u16 0, u32 NumSlots, u32 NumSets, u32 NumRecords
-///   u64 FunctionAddress, u64 StackSize, i32 CSRLo, i32 CSRHi
-///   Slot[NumSlots] { u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size_flags }
+/// Layout (little-endian, 8-byte aligned):
+///   Header[64]: version/reserved/header_bytes/blob_bytes,
+///     PC-relative FunctionAddress, StackSize, CSRLo/CSRHi,
+///     NumRoots/NumObjects/NumRootSets/NumObjectSets/NumRecords,
+///     FunctionObjectSet (UINT32_MAX if absent), reserved u64
+///   Object[NumObjects]: u8 base, u8 0, u16 0, u32 words,
+///                       i64 byte_offset, i32 owner_offset, u32 0
+///   Root[NumRoots]: u8 kind, u8 0, u16 dwarf_reg, i32 offset, u32 size
 ///   <pad to 8>
-///   u64 SetBits[NumSets][ceil(NumSlots/64)]
-///   Record[NumRecords] { u32 instr_offset,
-///                        u32 set_idx | prologue_entry << 30 | incomplete << 31 }
+///   RootBits[NumRootSets][ceil(NumRoots/64)]
+///   ObjectBits[NumObjectSets][ceil(NumObjects/64)]
+///   Record[NumRecords]: u32 instr_offset, u32 root_set, u32 object_set,
+///                       u32 flags (bit 0: prologue entry)
 void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
                                         const FunctionInfo &FnInfo,
                                         unsigned StartIdx) {
+  constexpr uint32_t WitnessFlag = uint32_t(1) << 30;
+  constexpr uint64_t PreciseID = uint64_t(1) << 63;
+  constexpr uint64_t PrologueID = uint64_t(1) << 62;
+  auto checkedCount = [](uint64_t Count) -> uint32_t {
+    if (Count > UINT32_MAX)
+      report_fatal_error("ROG compact stackmap count exceeds 32 bits");
+    return uint32_t(Count);
+  };
   struct Slot {
     uint8_t Kind;
     uint16_t Reg;
     int32_t Offset;
     uint32_t SizeFlags;
   };
-  SmallVector<Slot, 32> Dict;
-  DenseMap<std::pair<uint64_t, uint64_t>, uint32_t> DictIdx;
-  std::vector<std::vector<uint32_t>> Sets;
-  std::map<std::vector<uint32_t>, uint32_t> SetIdx;
+  struct Object {
+    uint8_t Base;
+    uint32_t Words;
+    int64_t Offset;
+    int32_t OwnerOffset;
+  };
   struct Rec {
     const MCExpr *Offset;
-    uint32_t SetAndFlags;
+    uint32_t Slots;
+    bool Precise;
+    bool Prologue;
+    uint32_t RootSet = 0;
+    uint32_t ObjectSet = 0;
   };
+  SmallVector<Slot, 32> Dict;
+  DenseMap<std::pair<uint64_t, uint64_t>, uint32_t> DictIdx;
+  std::vector<std::vector<uint32_t>> SlotSets;
+  std::map<std::vector<uint32_t>, uint32_t> SlotSetIdx;
   std::vector<Rec> Recs;
   Recs.reserve(FnInfo.RecordCount);
 
   for (uint64_t I = 0; I < FnInfo.RecordCount; ++I) {
     const CallsiteInfo &CSI = CSInfos[StartIdx + I];
-
-    // Fold the v3 location stream into semantic slots, mirroring the runtime
-    // reader: value locations (Register/Direct/Indirect) are kept; a Constant
-    // immediately after a Direct is that Direct's size|flags annotation; any
-    // other Constant/ConstantIndex is statepoint metadata and dropped.
+    // Fold size annotations before interning locations in their original order.
     SmallVector<Slot, 64> RecSlots;
     bool AwaitingSize = false;
     for (const Location &Loc : CSI.Locations) {
@@ -1052,165 +1010,177 @@ void StackMaps::emitCompactFunctionBlob(MCStreamer &OS, const MCSymbol *FnSym,
         break;
       }
     }
-
     std::vector<uint32_t> Set;
-    Set.reserve(RecSlots.size());
     for (const Slot &S : RecSlots) {
-      auto Key = std::make_pair((uint64_t(S.Kind) << 48) |
-                                    (uint64_t(S.Reg) << 32) |
-                                    uint64_t(uint32_t(S.Offset)),
-                                uint64_t(S.SizeFlags));
-      auto [It, New] = DictIdx.try_emplace(Key, Dict.size());
+      auto Key =
+          std::make_pair((uint64_t(S.Kind) << 48) | (uint64_t(S.Reg) << 32) |
+                             uint64_t(uint32_t(S.Offset)),
+                         uint64_t(S.SizeFlags));
+      auto [It, New] = DictIdx.try_emplace(Key, checkedCount(Dict.size()));
       if (New)
         Dict.push_back(S);
       Set.push_back(It->second);
     }
     llvm::sort(Set);
     Set.erase(llvm::unique(Set), Set.end());
-
-    auto [SIt, SNew] = SetIdx.try_emplace(Set, uint32_t(Sets.size()));
-    if (SNew)
-      Sets.push_back(std::move(Set));
-    assert(Sets.size() < (uint32_t(1) << 30) && "set index overflows 30 bits");
-
-    uint32_t SetAndFlags = SIt->second | uint32_t((CSI.ID >> 62) & 1) << 30 |
-                           uint32_t(CSI.ID >> 63) << 31;
-    Recs.push_back({CSI.CSOffsetExpr, SetAndFlags});
+    auto [SetIt, NewSet] =
+        SlotSetIdx.try_emplace(Set, checkedCount(SlotSets.size()));
+    if (NewSet)
+      SlotSets.push_back(std::move(Set));
+    Recs.push_back({CSI.CSOffsetExpr, SetIt->second, bool(CSI.ID & PreciseID),
+                    bool(CSI.ID & PrologueID)});
   }
 
-  // Header.
-  OS.AddComment("ROG compact stackmap version");
-  OS.emitIntValue(0x54, 1);
-  OS.emitIntValue(0, 1); // Reserved.
-  OS.emitInt16(0);       // Reserved.
-  OS.AddComment("  Num Slots");
-  OS.emitInt32(Dict.size());
-  OS.AddComment("  Num Sets");
-  OS.emitInt32(Sets.size());
-  OS.AddComment("  Num Records");
-  OS.emitInt32(Recs.size());
+  // Preserve original slot identities, including two different size-flag
+  // annotations that normalize to the same object. This also preserves owner
+  // selection order when stack coloring maps several objects to one base.
+  std::vector<Object> Objects;
+  std::vector<uint32_t> DirectObjects(Dict.size(), UINT32_MAX);
+  for (const Rec &R : Recs) {
+    if (!R.Precise || R.Prologue)
+      continue;
+    for (uint32_t Index : SlotSets[R.Slots]) {
+      const Slot &S = Dict[Index];
+      if (S.Kind != Location::Direct)
+        continue;
+      DirectObjects[Index] = 0; // Mark slots requiring an object projection.
+    }
+  }
+  for (uint32_t Index = 0; Index < Dict.size(); ++Index) {
+    if (DirectObjects[Index] == UINT32_MAX)
+      continue;
+    const Slot &S = Dict[Index];
+    if (S.Reg != 6 && S.Reg != 7)
+      report_fatal_error("ROG stack object must be RSP- or RBP-relative");
+    // The x86-64 frame bases are word aligned. Match stackmap_location's
+    // inward alignment, using signed 64-bit offsets to avoid truncating an
+    // i32 offset whose aligned successor is outside the i32 range.
+    if (FnInfo.StackSize != UINT64_MAX && FnInfo.StackSize % 8 != 0)
+      report_fatal_error("ROG stack object frame is not word aligned");
+    int64_t Offset = S.Offset;
+    int64_t Start = Offset + ((8 - (Offset & 7)) & 7);
+    int64_t Bytes = std::max<uint32_t>(S.SizeFlags & ~WitnessFlag, 8);
+    int64_t End = (Offset + Bytes) & ~int64_t(7);
+    DirectObjects[Index] = checkedCount(Objects.size());
+    Objects.push_back({uint8_t(S.Reg == 7 ? 1 : 2),
+                       checkedCount(End > Start ? (End - Start) / 8 : 0), Start,
+                       S.Offset});
+  }
 
-  // 0x54: the function address is PC-relative (fn - <address of this field>).
-  // An absolute 8-byte address needs a dynamic relocation, which a PIC dylib
-  // link rejects for preemptible symbols (rust-lld: "R_X86_64_64 cannot be
-  // used against symbol ...; recompile with -fPIC" when ROG's rustc builds
-  // libstd) and costs one runtime relocation per blob even in executables.
-  // The PC-relative difference is a link-time constant: no relocations at
-  // all, and the section stays genuinely read-only.
-  OS.AddComment("Function Address (PC-relative)");
+  std::vector<uint32_t> FunctionObjects;
+  for (const FunctionInfo::StackObjectInfo &S : FnInfo.StackObjects) {
+    FunctionObjects.push_back(checkedCount(Objects.size()));
+    Objects.push_back({uint8_t(S.Kind),
+                       checkedCount((uint64_t(S.Size) + 7) / 8), S.Offset,
+                       S.Offset});
+  }
+
+  // The zero bitmap is always set 0, including when its dictionary is empty.
+  std::vector<std::vector<uint32_t>> RootSets(1), ObjectSets(1);
+  std::map<std::vector<uint32_t>, uint32_t> RootSetIdx{{{}, 0}},
+      ObjectSetIdx{{{}, 0}};
+  auto intern = [&](const std::vector<uint32_t> &Set,
+                    std::vector<std::vector<uint32_t>> &Sets,
+                    std::map<std::vector<uint32_t>, uint32_t> &Indices) {
+    auto [It, New] = Indices.try_emplace(Set, checkedCount(Sets.size()));
+    if (New)
+      Sets.push_back(Set);
+    return It->second;
+  };
+  uint32_t FunctionObjectSet = UINT32_MAX;
+  if (!FunctionObjects.empty())
+    FunctionObjectSet = intern(FunctionObjects, ObjectSets, ObjectSetIdx);
+  for (Rec &R : Recs) {
+    std::vector<uint32_t> Roots, EligibleObjects;
+    for (uint32_t Index : SlotSets[R.Slots]) {
+      const Slot &S = Dict[Index];
+      bool Witness = S.Kind == Location::Direct && (S.SizeFlags & WitnessFlag);
+      if (!R.Precise || !Witness)
+        Roots.push_back(Index);
+      if (R.Precise && !R.Prologue && S.Kind == Location::Direct)
+        EligibleObjects.push_back(DirectObjects[Index]);
+    }
+    if (!R.Precise && !R.Prologue)
+      EligibleObjects = FunctionObjects;
+    R.RootSet = intern(Roots, RootSets, RootSetIdx);
+    // The stack-growth call precedes frame setup. Its incoming-argument
+    // roots remain valid, but no body-frame objects exist yet, regardless of
+    // whether the ID also carries the authoritative-object bit.
+    R.ObjectSet = R.Prologue ? 0 : intern(EligibleObjects, ObjectSets, ObjectSetIdx);
+  }
+
+  uint32_t NumRoots = checkedCount(Dict.size());
+  uint32_t NumObjects = checkedCount(Objects.size());
+  uint32_t NumRootSets = checkedCount(RootSets.size());
+  uint32_t NumObjectSets = checkedCount(ObjectSets.size());
+  uint32_t NumRecords = checkedCount(Recs.size());
+  uint64_t RootWords = (uint64_t(NumRoots) + 63) / 64;
+  uint64_t ObjectWords = (uint64_t(NumObjects) + 63) / 64;
+  uint64_t BlobBytes = alignTo(uint64_t(64) + uint64_t(24) * NumObjects +
+                                   uint64_t(12) * NumRoots,
+                               Align(8)) +
+                       RootWords * 8 * NumRootSets +
+                       ObjectWords * 8 * NumObjectSets +
+                       uint64_t(16) * NumRecords;
+
+  OS.emitValueToAlignment(Align(8));
+  OS.AddComment("ROG compact stackmap version");
+  OS.emitIntValue(0x55, 1);
+  OS.emitIntValue(0, 1);
+  OS.emitInt16(64);
+  OS.emitInt32(checkedCount(BlobBytes));
+  // Field-relative function addresses require no DSO dynamic relocation.
   MCContext &Ctx = OS.getContext();
   MCSymbol *Here = Ctx.createTempSymbol();
   OS.emitLabel(Here);
-  OS.emitValue(
-      MCBinaryExpr::createSub(MCSymbolRefExpr::create(FnSym, Ctx),
-                              MCSymbolRefExpr::create(Here, Ctx), Ctx),
-      8);
-  OS.AddComment("  Stack Size");
+  OS.emitValue(MCBinaryExpr::createSub(MCSymbolRefExpr::create(FnSym, Ctx),
+                                       MCSymbolRefExpr::create(Here, Ctx), Ctx),
+               8);
   OS.emitIntValue(FnInfo.StackSize, 8);
-  OS.AddComment("  CSR area Lo (rbp-relative)");
-  OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRLo), 4);
-  OS.AddComment("  CSR area Hi (rbp-relative)");
-  OS.emitIntValue(static_cast<uint32_t>(FnInfo.CSRHi), 4);
+  OS.emitInt32(uint32_t(FnInfo.CSRLo));
+  OS.emitInt32(uint32_t(FnInfo.CSRHi));
+  OS.emitInt32(NumRoots);
+  OS.emitInt32(NumObjects);
+  OS.emitInt32(NumRootSets);
+  OS.emitInt32(NumObjectSets);
+  OS.emitInt32(NumRecords);
+  OS.emitInt32(FunctionObjectSet);
+  OS.emitIntValue(0, 8);
 
-  // Slot dictionary.
+  for (const Object &O : Objects) {
+    OS.emitIntValue(O.Base, 1);
+    OS.emitIntValue(0, 1);
+    OS.emitInt16(0);
+    OS.emitInt32(O.Words);
+    OS.emitIntValue(uint64_t(O.Offset), 8);
+    OS.emitInt32(uint32_t(O.OwnerOffset));
+    OS.emitInt32(0);
+  }
   for (const Slot &S : Dict) {
     OS.emitIntValue(S.Kind, 1);
-    OS.emitIntValue(0, 1); // Reserved.
+    OS.emitIntValue(0, 1);
     OS.emitInt16(S.Reg);
-    OS.emitIntValue(static_cast<uint32_t>(S.Offset), 4);
-    OS.emitIntValue(S.SizeFlags, 4);
+    OS.emitInt32(uint32_t(S.Offset));
+    OS.emitInt32(S.SizeFlags);
   }
   OS.emitValueToAlignment(Align(8));
-
-  // Live-set bitmaps.
-  const size_t Words = (Dict.size() + 63) / 64;
-  SmallVector<uint64_t, 64> Bits;
-  for (const auto &Set : Sets) {
-    Bits.assign(Words, 0);
-    for (uint32_t Idx : Set)
-      Bits[Idx / 64] |= uint64_t(1) << (Idx % 64);
-    for (uint64_t W : Bits)
-      OS.emitIntValue(W, 8);
-  }
-
-  // Records.
+  auto emitSets = [&](const std::vector<std::vector<uint32_t>> &Sets,
+                      uint64_t Words) {
+    SmallVector<uint64_t, 64> Bits;
+    for (const auto &Set : Sets) {
+      Bits.assign(Words, 0);
+      for (uint32_t Index : Set)
+        Bits[Index / 64] |= uint64_t(1) << (Index % 64);
+      for (uint64_t Word : Bits)
+        OS.emitIntValue(Word, 8);
+    }
+  };
+  emitSets(RootSets, RootWords);
+  emitSets(ObjectSets, ObjectWords);
   for (const Rec &R : Recs) {
     OS.emitValue(R.Offset, 4);
-    OS.emitIntValue(R.SetAndFlags, 4);
+    OS.emitInt32(R.RootSet);
+    OS.emitInt32(R.ObjectSet);
+    OS.emitInt32(R.Prologue ? 1 : 0);
   }
-}
-
-/// ROG precise GC: side table for function-level stack objects.
-///
-/// The normal stackmap remains the authoritative per-callsite precise-root map.
-/// This section emits stack-object metadata collected from the function's
-/// MachineFrameInfo frame objects into one compact, per-function blob so the
-/// runtime can build:
-///   - return PC -> stack-object-set index
-///   - stack-object-set index -> sorted stack-object intervals
-///
-/// Layout (little-endian, pointer-sized PCs):
-///   u32 NumPCs (high bit set for field-relative PCs in PIC output)
-///   uintptr PC[NumPCs] (absolute or field-relative)
-///   u32 NumStackObjects
-///   StackObject[NumStackObjects] { u32 kind, i32 offset, u32 size }
-///
-/// `kind` is 1 for stack-pointer-relative offsets and 2 for frame-pointer-
-/// relative offsets. `offset` is signed. Callsite records provide only the PC
-/// list for the owning function; the object list is not derived from callsite
-/// locations.
-void StackMaps::emitStackObjectBlob(MCStreamer &OS, const MCSymbol *FnSym,
-                                    const FunctionInfo &FnInfo,
-                                    unsigned StartIdx) {
-  SmallVector<const MCExpr *, 32> PCs;
-  for (uint64_t I = 0; I < FnInfo.RecordCount; ++I)
-    PCs.push_back(CSInfos[StartIdx + I].CSOffsetExpr);
-
-  if (PCs.empty() || FnInfo.StackObjects.empty())
-    return;
-
-  MCContext &OutContext = AP.OutStreamer->getContext();
-  const MCSymbolELF *FnSymELF = static_cast<const MCSymbolELF *>(FnSym);
-  const MCSymbolELF *Group = nullptr;
-  if (FnSym->isInSection())
-    Group = static_cast<const MCSectionELF &>(FnSym->getSection()).getGroup();
-
-  unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_LINK_ORDER;
-  if (Group)
-    Flags |= ELF::SHF_GROUP;
-
-  MCSectionELF *Sec = OutContext.getELFSection(
-      ".llvm_stackobjs", ELF::SHT_PROGBITS, Flags, /*EntrySize=*/0, Group,
-      /*IsComdat=*/Group != nullptr, MCSection::NonUniqueID, FnSymELF);
-  OS.switchSection(Sec);
-  OS.emitValueToAlignment(Align(8));
-
-  OS.AddComment("ROG stack object PC count");
-  // Match compact stackmaps: field-relative PCs avoid absolute relocations
-  // against function symbols when this read-only section is linked into a DSO.
-  // The count's high bit distinguishes this from the legacy absolute format.
-  if (PCs.size() >= (uint64_t(1) << 31))
-    report_fatal_error("ROG stack object PC count is not representable");
-  const bool PCRelative = AP.isPositionIndependent();
-  OS.emitInt32(uint32_t(PCs.size()) | (PCRelative ? (uint32_t(1) << 31) : 0));
-  MCContext &Ctx = OS.getContext();
-  for (const MCExpr *PCOffset : PCs) {
-    const MCExpr *PC = MCBinaryExpr::createAdd(
-        MCSymbolRefExpr::create(FnSym, Ctx), PCOffset, Ctx);
-    if (PCRelative) {
-      MCSymbol *Here = Ctx.createTempSymbol();
-      OS.emitLabel(Here);
-      PC = MCBinaryExpr::createSub(PC, MCSymbolRefExpr::create(Here, Ctx), Ctx);
-    }
-    OS.emitValue(PC, sizeof(uintptr_t));
-  }
-
-  OS.AddComment("ROG stack object count");
-  OS.emitInt32(FnInfo.StackObjects.size());
-  for (const FunctionInfo::StackObjectInfo &Obj : FnInfo.StackObjects) {
-    OS.emitInt32(Obj.Kind);
-    OS.emitInt32(Obj.Offset);
-    OS.emitInt32(Obj.Size);
-  }
-  OS.emitValueToAlignment(Align(8));
 }

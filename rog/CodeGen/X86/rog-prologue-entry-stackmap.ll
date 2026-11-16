@@ -4,7 +4,7 @@
 ; A "rog-stack-check" function calls rog_morestack_abi BEFORE it establishes
 ; RBP, so the GC's frame-pointer walk drops this function's caller at that
 ; call. adjustForROGPrologue emits a prologue-entry stackmap record (ID bit
-; 62 -> compact-record flag bit 30, value 0x40000000) at the call's return
+; 62 -> compact-record flag bit 0) at the call's return
 ; point; its only location is a Direct describing the incoming
 ; stack-argument area [entry_rsp + 8, entry_rsp + 8 + args), and the set is
 ; empty when the function takes no stack arguments.
@@ -12,6 +12,7 @@
 target triple = "x86_64-unknown-linux-gnu"
 
 declare rogcc void @bar()
+declare void @use(ptr)
 declare token @llvm.experimental.gc.statepoint.p0(i64, i32, ptr, i32, i32, ...)
 
 ; Eight pointer arguments fill ROG's GPR argument registers; %s0 and %s1
@@ -27,6 +28,8 @@ define rogcc ptr @grow_with_stack_args(
 ; LARGE-NEXT:    callq *%r11
 ; CHECK-NEXT:  .Ltmp[[PE:[0-9]+]]:
 entry:
+  %object = alloca [2 x ptr], align 8, !rog.stackobj !0
+  call void @use(ptr %object)
   call rogcc token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(
           i64 1, i32 0, ptr elementtype(void ()) @bar,
@@ -46,6 +49,8 @@ define rogcc ptr @grow_reg_only(ptr %a0, ptr %a1) #0 gc "statepoint-example" {
 ; LARGE-NEXT:    callq *%r11
 ; CHECK-NEXT:  .Ltmp[[PE2:[0-9]+]]:
 entry:
+  %object = alloca [2 x ptr], align 8, !rog.stackobj !0
+  call void @use(ptr %object)
   call rogcc token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(
           i64 2, i32 0, ptr elementtype(void ()) @bar,
@@ -54,24 +59,35 @@ entry:
   ret ptr %a1
 }
 
-; The per-function compact blobs follow the function bodies. Version 0x53;
+; The per-function compact blobs follow the function bodies. Version 0x55;
 ; the Direct arg-area slot is (kind 2, reserved 0, DWARF reg 7 = RSP,
 ; offset 8, size 16); the record at the morestack return point carries
-; set_idx | 1 << 30 (1073741825 = 0x40000001).
+; separate root/object indices followed by prologue flag 1. Body records
+; select the nonempty function object set; entry records must select empty
+; because RBP/RSP do not yet describe the body frame at rog_morestack_abi.
 ; CHECK:         .section .llvm_stackmaps,"ao",@progbits,grow_with_stack_args
-; CHECK:         .byte 84
-; CHECK:         .byte 2
-; CHECK-NEXT:    .byte 0
-; CHECK-NEXT:    .short 7
-; CHECK-NEXT:    .long 8
+; CHECK:         .byte 85
+; CHECK:         .long 8
 ; CHECK-NEXT:    .long 16
+; CHECK:         .long {{.*}}-grow_with_stack_args
+; CHECK-NEXT:    .long {{[0-9]+}}
+; CHECK-NEXT:    .long 1
+; CHECK-NEXT:    .long 0
 ; CHECK:         .long .Ltmp[[PE]]-grow_with_stack_args
-; CHECK-NEXT:    .long 1073741825
+; CHECK-NEXT:    .long {{[0-9]+}}
+; CHECK-NEXT:    .long 0
+; CHECK-NEXT:    .long 1
 
 ; CHECK:         .section .llvm_stackmaps,"ao",@progbits,grow_reg_only
-; CHECK:         .byte 84
+; CHECK:         .byte 85
+; CHECK:         .long {{.*}}-grow_reg_only
+; CHECK-NEXT:    .long {{[0-9]+}}
+; CHECK-NEXT:    .long 1
+; CHECK-NEXT:    .long 0
 ; CHECK:         .long .Ltmp[[PE2]]-grow_reg_only
-; CHECK-NEXT:    .long 1073741825
+; CHECK-NEXT:    .long {{[0-9]+}}
+; CHECK-NEXT:    .long 0
+; CHECK-NEXT:    .long 1
 ; CHECK-NOT:     .llvm_stackmaps,"ao",@progbits,grow_no_gc
 
 ; A stack-check function WITHOUT a GC strategy (the Rust runtime/std built
@@ -89,3 +105,26 @@ entry:
 }
 
 attributes #0 = { "rog-stack-check" "frame-pointer"="all" }
+
+!0 = !{}
+
+; Prologue exclusion also applies if an ID carries both the entry bit and
+; the authoritative-object bit. Keep the Direct root, but select no objects.
+; CHECK:         .section .llvm_stackmaps,"ao",@progbits,explicit_entry_id
+; CHECK:         .byte 85
+; CHECK:         .long {{.*}}-explicit_entry_id
+; CHECK-NEXT:    .long 1
+; CHECK-NEXT:    .long 0
+; CHECK-NEXT:    .long 1
+
+define void @explicit_entry_id() #1 {
+entry:
+  %object = alloca [2 x ptr], align 8, !rog.stackobj !0
+  call void @use(ptr %object)
+  call void (i64, i32, ...) @llvm.experimental.stackmap(
+      i64 -4611686018427387904, i32 0, ptr %object, i64 16)
+  ret void
+}
+
+declare void @llvm.experimental.stackmap(i64, i32, ...)
+attributes #1 = { "frame-pointer"="all" }

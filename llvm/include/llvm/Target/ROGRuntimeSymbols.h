@@ -11,9 +11,8 @@ static const unsigned long kROGStackRedZoneSize     = 1024;
 // of the kROGStackCheckFn call: bit 62 marks the record as "prologue-entry"
 // (the function is caught between entry and prologue; the record's only
 // locations describe the incoming stack-argument area relative to the entry
-// RSP). The compact-blob emitter folds the bit into the record's
-// set_and_flags bit 30; the frontend's statepoint IDs are small sequential
-// integers, so the bit is otherwise never set.
+// RSP). The compact-blob emitter folds this ID bit into version 0x55
+// record flags bit 0.
 static const unsigned long long kROGPrologueEntryStackMapID = 1ULL << 62;
 }
 

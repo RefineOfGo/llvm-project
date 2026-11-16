@@ -19,7 +19,7 @@ configure_lit_site_cfg(
   "ROG_BINARY_DIR"
   )
 
-set(ROG_TEST_DEPENDS ${LLVM_TEST_DEPENDS_COMMON} llc llvm-mc llvm-readelf opt)
+set(ROG_TEST_DEPENDS ${LLVM_TEST_DEPENDS_COMMON} llc llvm-mc llvm-readelf llvm-readobj opt)
 if(TARGET lld)
   list(APPEND ROG_TEST_DEPENDS lld)
 endif()

@@ -22,6 +22,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ROGGC.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
@@ -50,13 +51,13 @@ static bool shouldOptimizeROGFunction(Function &F) {
 using BudgetTy = uint32_t;
 using BudgetState = SmallVector<BudgetTy, 16>;
 
-static Value *getI8GlobalObject(Value *Switch) {
+static Value *getSwitchGlobalObject(Value *Switch) {
   if (Switch == nullptr)
     return nullptr;
 
   Value *SwitchObject = Switch->stripPointerCastsAndAliases();
   auto *SwitchGlobal = dyn_cast<GlobalVariable>(SwitchObject);
-  if (SwitchGlobal == nullptr || !SwitchGlobal->getValueType()->isIntegerTy(8))
+  if (SwitchGlobal == nullptr)
     return nullptr;
 
   return SwitchObject;
@@ -64,13 +65,16 @@ static Value *getI8GlobalObject(Value *Switch) {
 
 static Value *getROGGCWBSwitchObject(Module &M) {
   if (Value *SwitchObject =
-          getI8GlobalObject(M.getNamedValue("ROG_GCWB_SWITCH")))
+          getSwitchGlobalObject(M.getNamedValue("ROG_GCWB_SWITCH")))
     return SwitchObject;
   return nullptr;
 }
 
 static bool isROGGCWBSwitchLoad(const LoadInst *LI, const Value *SwitchObject) {
-  return LI->getPointerOperand()->stripPointerCastsAndAliases() == SwitchObject;
+  // The runtime may wrap the byte flag in a cache-padded aggregate. Match
+  // the byte load at offset zero, rather than the global storage type.
+  return LI->getType()->isIntegerTy(8) &&
+         LI->getPointerOperand()->stripPointerCastsAndAliases() == SwitchObject;
 }
 
 static bool isNonBlockingCall(const Function *Callee) {
@@ -99,6 +103,9 @@ static bool isBlockingCall(const Instruction &I) {
   if (isa<DbgInfoIntrinsic>(CB))
     return false;
   const Function *Callee = CB->getCalledFunction();
+  // A statepoint preserves the blocking behavior of its wrapped callee.
+  if (const auto *Statepoint = dyn_cast<GCStatepointInst>(CB))
+    Callee = Statepoint->getActualCalledFunction();
   if (isNonBlockingCall(Callee))
     return false;
   // conservatively assume any call we don't recognize is a blocking call.
@@ -141,7 +148,8 @@ static void intersectBudgetState(BudgetState &State, const BudgetState &Other) {
 static void
 transferInstruction(Instruction &I, BudgetState &State,
                     const DenseMap<LoadInst *, unsigned> &LoadToIndex) {
-  if (isa<DbgInfoIntrinsic>(I))
+  // Pseudo probes are profiling markers, not executing calls or safepoints.
+  if (isa<DbgInfoIntrinsic>(I) || isa<PseudoProbeInst>(I))
     return;
 
   if (isBlockingCall(I)) {

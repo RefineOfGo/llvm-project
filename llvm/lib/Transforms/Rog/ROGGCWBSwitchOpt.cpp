@@ -80,11 +80,10 @@ static Value *getSwitchGlobalObject(Value *Switch) {
     return nullptr;
 
   Value *SwitchObject = Switch->stripPointerCastsAndAliases();
-  auto *SwitchGlobal = dyn_cast<GlobalVariable>(SwitchObject);
-  if (SwitchGlobal == nullptr)
-    return nullptr;
-
-  assert(isROGGCWBSwitchType(SwitchGlobal->getValueType()) &&
+  assert(isa<GlobalVariable>(SwitchObject) &&
+         "ROG_GCWB_SWITCH must resolve to a global variable");
+  assert(isROGGCWBSwitchType(
+             cast<GlobalVariable>(SwitchObject)->getValueType()) &&
          "ROG_GCWB_SWITCH must be CachePadded<AtomicBool>");
   return SwitchObject;
 }

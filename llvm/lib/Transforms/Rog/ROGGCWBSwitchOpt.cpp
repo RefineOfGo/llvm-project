@@ -51,27 +51,57 @@ static bool shouldOptimizeROGFunction(Function &F) {
 using BudgetTy = uint32_t;
 using BudgetState = SmallVector<BudgetTy, 16>;
 
-static Value *getI8GlobalObject(Value *Switch) {
+[[maybe_unused]] static bool isROGGCWBSwitchType(Type *Ty) {
+  if (Ty->isIntegerTy(8))
+    return true;
+
+  // CachePadded<AtomicBool> has a byte flag at offset zero followed by padding.
+  auto *StorageTy = dyn_cast<StructType>(Ty);
+  if (!StorageTy || StorageTy->getNumElements() != 2)
+    return false;
+  auto *PaddingTy = dyn_cast<ArrayType>(StorageTy->getElementType(1));
+  if (!PaddingTy || !PaddingTy->getElementType()->isIntegerTy(8))
+    return false;
+
+  // Rust emits nested wrappers in declarations and [1 x i8] in definitions.
+  Type *FlagTy = StorageTy->getElementType(0);
+  while (auto *WrapperTy = dyn_cast<StructType>(FlagTy)) {
+    if (WrapperTy->getNumElements() != 1)
+      return false;
+    FlagTy = WrapperTy->getElementType(0);
+  }
+  if (auto *BytesTy = dyn_cast<ArrayType>(FlagTy)) {
+    if (BytesTy->getNumElements() != 1)
+      return false;
+    FlagTy = BytesTy->getElementType();
+  }
+  return FlagTy->isIntegerTy(8);
+}
+
+static Value *getSwitchGlobalObject(Value *Switch) {
   if (Switch == nullptr)
     return nullptr;
 
   Value *SwitchObject = Switch->stripPointerCastsAndAliases();
   auto *SwitchGlobal = dyn_cast<GlobalVariable>(SwitchObject);
-  if (SwitchGlobal == nullptr || !SwitchGlobal->getValueType()->isIntegerTy(8))
+  if (SwitchGlobal == nullptr)
     return nullptr;
 
+  assert(isROGGCWBSwitchType(SwitchGlobal->getValueType()) &&
+         "ROG_GCWB_SWITCH must be i8 or CachePadded<AtomicBool>");
   return SwitchObject;
 }
 
 static Value *getROGGCWBSwitchObject(Module &M) {
   if (Value *SwitchObject =
-          getI8GlobalObject(M.getNamedValue("ROG_GCWB_SWITCH")))
+          getSwitchGlobalObject(M.getNamedValue("ROG_GCWB_SWITCH")))
     return SwitchObject;
   return nullptr;
 }
 
 static bool isROGGCWBSwitchLoad(const LoadInst *LI, const Value *SwitchObject) {
-  return LI->getPointerOperand()->stripPointerCastsAndAliases() == SwitchObject;
+  return LI->getType()->isIntegerTy(8) &&
+         LI->getPointerOperand()->stripPointerCastsAndAliases() == SwitchObject;
 }
 
 static bool isNonBlockingCall(const Function *Callee) {

@@ -22,6 +22,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ROGGC.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
@@ -99,6 +100,9 @@ static bool isBlockingCall(const Instruction &I) {
   if (isa<DbgInfoIntrinsic>(CB))
     return false;
   const Function *Callee = CB->getCalledFunction();
+  // A statepoint preserves the blocking behavior of its wrapped callee.
+  if (const auto *Statepoint = dyn_cast<GCStatepointInst>(CB))
+    Callee = Statepoint->getActualCalledFunction();
   if (isNonBlockingCall(Callee))
     return false;
   // conservatively assume any call we don't recognize is a blocking call.

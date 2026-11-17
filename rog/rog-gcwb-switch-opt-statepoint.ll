@@ -1,6 +1,6 @@
 ; RUN: opt -passes=rog-gcwb-switch-opt -S %s | FileCheck %s
 
-@ROG_GCWB_SWITCH = external global i8
+@ROG_GCWB_SWITCH = external global { { { { i8 } } }, [127 x i8] }
 
 declare void @pre_write_2(i64, i64)
 declare void @blocking(i64, i64)

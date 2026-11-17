@@ -1,7 +1,7 @@
 ; RUN: opt -passes=rog-gcwb-switch-opt -S %s | FileCheck %s --check-prefix=OPT
 ; RUN: opt -passes=rog-gcwb-switch-opt -rog-gcwb-switch-opt-budget=3 -S %s | FileCheck %s --check-prefix=AGE
 
-@ROG_GCWB_SWITCH = external global i8
+@ROG_GCWB_SWITCH = external global { { { { i8 } } }, [127 x i8] }
 
 declare void @llvm.pseudoprobe(i64, i64, i32, i64)
 

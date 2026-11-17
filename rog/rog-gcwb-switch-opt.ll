@@ -8,7 +8,7 @@
 ; LTO-PM: Running pass: ROGGCWBSwitchOptPass
 ; THINLTO-PM: Running pass: ROGGCWBSwitchOptPass
 
-@ROG_GCWB_SWITCH = external global i8
+@ROG_GCWB_SWITCH = external global { { { { i8 } } }, [127 x i8] }
 
 declare void @callee()
 

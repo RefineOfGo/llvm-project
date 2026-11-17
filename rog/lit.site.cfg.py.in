@@ -10,9 +10,6 @@ config.targets = "@TARGETS_TO_BUILD@".split()
 config.rog_src_root = path(r"@ROG_SOURCE_DIR@")
 config.rog_obj_root = path(r"@ROG_BINARY_DIR@")
 
-if "@LLVM_ENABLE_ASSERTIONS@" == "ON":
-    config.available_features.add("asserts")
-
 import lit.llvm
 lit.llvm.initialize(lit_config, config)
 

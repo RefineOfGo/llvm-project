@@ -26,6 +26,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
 using namespace llvm;
@@ -51,7 +52,7 @@ static bool shouldOptimizeROGFunction(Function &F) {
 using BudgetTy = uint32_t;
 using BudgetState = SmallVector<BudgetTy, 16>;
 
-[[maybe_unused]] static bool isROGGCWBSwitchType(Type *Ty) {
+static bool isROGGCWBSwitchType(Type *Ty) {
   // CachePadded<AtomicBool> has a byte flag at offset zero followed by padding.
   auto *StorageTy = dyn_cast<StructType>(Ty);
   if (!StorageTy || StorageTy->getNumElements() != 2)
@@ -80,11 +81,13 @@ static Value *getSwitchGlobalObject(Value *Switch) {
     return nullptr;
 
   Value *SwitchObject = Switch->stripPointerCastsAndAliases();
-  assert(isa<GlobalVariable>(SwitchObject) &&
-         "ROG_GCWB_SWITCH must resolve to a global variable");
-  assert(isROGGCWBSwitchType(
-             cast<GlobalVariable>(SwitchObject)->getValueType()) &&
-         "ROG_GCWB_SWITCH must be CachePadded<AtomicBool>");
+  auto *SwitchGlobal = dyn_cast<GlobalVariable>(SwitchObject);
+  if (!SwitchGlobal)
+    report_fatal_error("ROG_GCWB_SWITCH must resolve to a global variable",
+                       /*gen_crash_diag=*/false);
+  if (!isROGGCWBSwitchType(SwitchGlobal->getValueType()))
+    report_fatal_error("ROG_GCWB_SWITCH must be CachePadded<AtomicBool>",
+                       /*gen_crash_diag=*/false);
   return SwitchObject;
 }
 

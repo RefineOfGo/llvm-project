@@ -1,16 +1,15 @@
-; REQUIRES: asserts
 ; RUN: split-file %s %t
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/scalar.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/flag-width.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/padding-type.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/flag-array.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/wrapper-fields.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/array-storage.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
-; RUN: not --crash opt -passes=rog-gcwb-switch-opt -disable-output %t/function-symbol.ll 2>&1 | FileCheck %s --check-prefix=SYMBOL
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/scalar.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/flag-width.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/padding-type.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/flag-array.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/wrapper-fields.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/array-storage.ll 2>&1 | FileCheck %s --check-prefix=LAYOUT
+; RUN: not opt -passes=rog-gcwb-switch-opt -disable-output %t/function-symbol.ll 2>&1 | FileCheck %s --check-prefix=SYMBOL
 
 ; Layout changes in the Rust runtime must fail loudly instead of disabling reuse.
-; LAYOUT: ROG_GCWB_SWITCH must be CachePadded<AtomicBool>
-; SYMBOL: ROG_GCWB_SWITCH must resolve to a global variable
+; LAYOUT: LLVM ERROR: ROG_GCWB_SWITCH must be CachePadded<AtomicBool>
+; SYMBOL: LLVM ERROR: ROG_GCWB_SWITCH must resolve to a global variable
 
 ;--- scalar.ll
 @ROG_GCWB_SWITCH = external global i8

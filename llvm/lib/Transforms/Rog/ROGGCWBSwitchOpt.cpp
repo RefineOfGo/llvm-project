@@ -52,9 +52,6 @@ using BudgetTy = uint32_t;
 using BudgetState = SmallVector<BudgetTy, 16>;
 
 [[maybe_unused]] static bool isROGGCWBSwitchType(Type *Ty) {
-  if (Ty->isIntegerTy(8))
-    return true;
-
   // CachePadded<AtomicBool> has a byte flag at offset zero followed by padding.
   auto *StorageTy = dyn_cast<StructType>(Ty);
   if (!StorageTy || StorageTy->getNumElements() != 2)
@@ -88,7 +85,7 @@ static Value *getSwitchGlobalObject(Value *Switch) {
     return nullptr;
 
   assert(isROGGCWBSwitchType(SwitchGlobal->getValueType()) &&
-         "ROG_GCWB_SWITCH must be i8 or CachePadded<AtomicBool>");
+         "ROG_GCWB_SWITCH must be CachePadded<AtomicBool>");
   return SwitchObject;
 }
 

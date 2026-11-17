@@ -141,7 +141,8 @@ static void intersectBudgetState(BudgetState &State, const BudgetState &Other) {
 static void
 transferInstruction(Instruction &I, BudgetState &State,
                     const DenseMap<LoadInst *, unsigned> &LoadToIndex) {
-  if (isa<DbgInfoIntrinsic>(I))
+  // Pseudo probes are profiling markers, not executing calls or safepoints.
+  if (isa<DbgInfoIntrinsic>(I) || isa<PseudoProbeInst>(I))
     return;
 
   if (isBlockingCall(I)) {

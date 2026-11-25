@@ -38,6 +38,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PseudoProbe.h"
 #include "llvm/IR/TrackingMDRef.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
@@ -940,6 +941,10 @@ MetadataLoader::MetadataLoaderImpl::lazyLoadModuleMetadataBlock() {
         // Read named metadata elements.
         unsigned Size = Record.size();
         NamedMDNode *NMD = TheModule.getOrInsertNamedMetadata(Name);
+        // Keep the marker for IRMover's diagnostic. The originating module
+        // emits the descriptors.
+        if (Name == PseudoProbeDescMetadataName)
+          break;
         for (unsigned i = 0; i != Size; ++i) {
           // FIXME: We could use a placeholder here, however NamedMDNode are
           // taking MDNode as operand and not using the Metadata infrastructure.
